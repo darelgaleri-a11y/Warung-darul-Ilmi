@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { isSupabaseConfigured, supabase } from './lib/supabase.js';
 
 const STORAGE_KEY = 'wdi-orders-v1';
 const SETTINGS_KEY = 'wdi-settings-v1';
@@ -34,11 +35,33 @@ function App() {
     name: '', gender: 'Putra', dorm: '', className: '', schedule: ''
   });
   const [notice, setNotice] = useState('');
+  const [databaseStatus, setDatabaseStatus] = useState(
+    isSupabaseConfigured ? 'checking' : 'missing-config'
+  );
   const [filter, setFilter] = useState('Semua');
   const [settings, setSettings] = useState(() => {
     try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{"wa":""}'); }
     catch { return { wa: '' }; }
   });
+
+  useEffect(() => {
+    let active = true;
+    async function checkDatabase() {
+      if (!isSupabaseConfigured || !supabase) {
+        setDatabaseStatus('missing-config');
+        return;
+      }
+      const { error } = await supabase
+        .from('store_settings')
+        .select('store_name')
+        .eq('id', true)
+        .maybeSingle();
+      if (!active) return;
+      setDatabaseStatus(error ? 'error' : 'connected');
+    }
+    checkDatabase();
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(orders)), [orders]);
   useEffect(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)), [settings]);
@@ -137,6 +160,12 @@ function App() {
     </header>
 
     <main className="main">
+      <div className={`notice db-status db-${databaseStatus}`} role="status">
+        {databaseStatus === 'checking' && 'Memeriksa koneksi database Supabase…'}
+        {databaseStatus === 'connected' && 'Terhubung ke Supabase. Tahap ini baru menguji koneksi; pesanan masih menggunakan penyimpanan lokal.'}
+        {databaseStatus === 'missing-config' && 'Supabase belum dikonfigurasi. Buat .env.local dari .env.example dan isi URL serta publishable key.'}
+        {databaseStatus === 'error' && 'Belum berhasil membaca database Supabase. Periksa URL, publishable key, dan tabel store_settings.'}
+      </div>
       {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Tutup pemberitahuan">×</button></div>}
 
       {page === 'order' && <section>
