@@ -185,12 +185,26 @@ function App() {
     if (!identity.name.trim() || !identity.dorm || !identity.className) { setNotice('Lengkapi nama, asrama, dan kelas.'); return; }
     if (!cart.length) { setNotice('Keranjang masih kosong.'); return; }
     const payload = cart.map(x=>({product_id:Number(x.id),quantity:x.qty}));
+    // The database requires a 256-bit random guest access token (64 hex characters).
+    if (!globalThis.crypto?.getRandomValues) { setNotice('Browser tidak mendukung pembuatan token pesanan yang aman. Gunakan browser terbaru melalui HTTPS.'); return; }
+    const tokenBytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(tokenBytes);
+    const accessToken = Array.from(tokenBytes, byte => byte.toString(16).padStart(2, '0')).join('');
     const {data,error} = await supabase.rpc('create_guest_order',{
       p_guest_name:identity.name.trim(),p_guest_gender:identity.gender,p_guest_dormitory:identity.dorm,p_guest_class:identity.className,
-      p_guest_phone:identity.phone.trim() || null,p_customer_note:identity.note.trim() || null,p_items:payload
+      p_guest_phone:identity.phone.trim() || null,p_customer_note:identity.note.trim() || null,p_items:payload,p_access_token:accessToken
     });
     if (error) { setNotice(`Pesanan gagal disimpan: ${error.message}. Pastikan migrasi Guest Checkout v2 sudah dijalankan.`); return; }
     const result = Array.isArray(data) ? data[0] : data;
+    // Keep the bearer token on this device so a future guest-order lookup can use it.
+    try {
+      const tokenStoreKey = 'wdi_guest_order_tokens';
+      const savedTokens = JSON.parse(localStorage.getItem(tokenStoreKey) || '[]');
+      savedTokens.push({order_id:result.order_id,order_number:result.order_number,access_token:accessToken,created_at:new Date().toISOString()});
+      localStorage.setItem(tokenStoreKey, JSON.stringify(savedTokens.slice(-50)));
+    } catch (storageError) {
+      console.warn('Token pesanan tidak dapat disimpan di perangkat ini.', storageError);
+    }
     const items = cart.map(x=>({...x}));
     const message = ['*PESANAN WARUNG DARUL ILMI*',`Nomor: ${result.order_number}`,`Nama: ${identity.name}`,`Kategori: ${identity.gender}`,`Asrama: ${identity.dorm}`,`Kelas: ${identity.className}`,`Tanggal pengiriman: ${new Date(`${result.delivery_date}T00:00:00`).toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}`,'', '*Rincian pesanan:*',...items.map(x=>`- ${x.name} x${x.qty} = ${money(x.price*x.qty)}`),`*Total: ${money(result.total_amount)}*`,storeSettings.bank_name?`Bank: ${storeSettings.bank_name}`:'',storeSettings.bank_account_number?`Rekening: ${storeSettings.bank_account_number}`:'',storeSettings.bank_account_name?`Atas nama: ${storeSettings.bank_account_name}`:'',identity.note?`Catatan: ${identity.note}`:'',storeSettings.payment_instructions||'Mohon konfirmasi pembayaran. Barang diserahkan setelah pembayaran diverifikasi.'].filter(Boolean).join('\n');
     setCart([]); setIdentity({name:'',gender:identity.gender,dorm:'',className:'',phone:'',note:''});

@@ -1,4 +1,4 @@
-# Warung Darul Ilmi v0.9 — Jadwal & Pengecualian Tanggal
+# Warung Darul Ilmi v0.9.1 — Jadwal & Pengecualian Tanggal
 
 ## Fitur
 - Semua fitur katalog v0.8 tetap dipertahankan.
@@ -20,3 +20,9 @@ Tidak memerlukan migrasi SQL baru. Fitur ini menggunakan tabel `delivery_date_ov
 - Tanggal yang ditambahkan sebagai libur akan menutup pengiriman pada tanggal itu, meskipun hari tersebut aktif pada jadwal mingguan.
 - Tanggal pengiriman khusus dapat mengaktifkan pengiriman meskipun hari itu tidak aktif pada jadwal mingguan.
 - Fungsi `next_delivery_date()` menghitung tanggal mulai BESOK sesuai implementasi database saat ini.
+
+
+### Perbaikan v0.9.1
+- Checkout membuat token akses tamu acak 256-bit (64 karakter heksadesimal) dan mengirimkannya melalui parameter `p_access_token` sesuai fungsi Supabase yang aktif.
+- Token disimpan lokal pada perangkat untuk mendukung fitur akses/penelusuran pesanan tamu berikutnya. Database hanya menyimpan hash SHA-256 token.
+- Tidak memerlukan migrasi SQL tambahan.
