@@ -1,28 +1,41 @@
-# Warung Darul Ilmi v0.9.1 — Jadwal & Pengecualian Tanggal
+# Warung Darul Ilmi v1.0 — WhatsApp Kasir Putra/Putri
 
-## Fitur
-- Semua fitur katalog v0.8 tetap dipertahankan.
-- Super Admin dapat mengatur hari pengiriman mingguan.
-- Super Admin dapat menambahkan tanggal libur (menutup pengiriman) atau tanggal pengiriman khusus.
-- Pengecualian tanggal menggunakan tabel `public.delivery_date_overrides` yang sudah tersedia sejak database v1.
-- Aturan tanggal khusus mengesampingkan jadwal mingguan melalui fungsi `public.next_delivery_date()`.
+## Fitur baru
+- Pesanan pelanggan kategori Putra diarahkan ke nomor WhatsApp Kasir Putra.
+- Pesanan pelanggan kategori Putri diarahkan ke nomor WhatsApp Kasir Putri.
+- Nomor WhatsApp Admin Umum yang lama tetap tersedia sebagai nomor cadangan jika nomor jalur terkait belum diisi.
+- Pesan WhatsApp memuat rincian pesanan, total, rekening transfer, dan instruksi mengirim foto/screenshot bukti transfer di chat yang sama.
+- Bukti transfer tetap dikirim langsung melalui WhatsApp; aplikasi tidak menerima atau menyimpan file bukti transfer.
 
-## Instalasi
-1. Ekstrak ZIP ke folder baru.
-2. Salin `.env.local` dari instalasi v0.8 ke folder ini. Jangan menyalin atau membagikan `service_role` key.
-3. Jalankan `npm install` lalu `npm run dev`.
-4. Login sebagai Super Admin, buka menu Pengaturan, lalu bagian Pengecualian tanggal pengiriman.
+## Instalasi / pembaruan
+1. Ekstrak ZIP ke folder baru, jangan menimpa folder versi lama.
+2. Salin file `.env.local` dari instalasi v0.9.1. Jangan membagikan `service_role` key.
+3. Buka folder baru di VS Code.
+4. Jalankan `npm install`, lalu `npm run dev`.
 
-## Database
-Tidak memerlukan migrasi SQL baru. Fitur ini menggunakan tabel `delivery_date_overrides` dan kebijakan RLS yang sudah ada pada database v1. Jika tabel tersebut tidak ada, pastikan database v1 telah diterapkan.
+## Migrasi database v4 (wajib satu kali)
+1. Buka Supabase → SQL Editor → New query.
+2. Buka file `migration-v4-whatsapp-routing.sql` dari ZIP ini, salin seluruh isinya, lalu jalankan.
+3. Pastikan muncul `Success`.
+4. Tidak perlu mengulang migrasi v1, v2, atau v3.
 
-## Catatan
-- Tanggal yang ditambahkan sebagai libur akan menutup pengiriman pada tanggal itu, meskipun hari tersebut aktif pada jadwal mingguan.
-- Tanggal pengiriman khusus dapat mengaktifkan pengiriman meskipun hari itu tidak aktif pada jadwal mingguan.
-- Fungsi `next_delivery_date()` menghitung tanggal mulai BESOK sesuai implementasi database saat ini.
+## Pengaturan nomor WhatsApp
+Login sebagai Super Admin → Pengaturan → Informasi toko & pembayaran. Isi:
+- WhatsApp Kasir Putra, contoh format `628xxxxxxxxxx`.
+- WhatsApp Kasir Putri, contoh format `628xxxxxxxxxx`.
+- WhatsApp Admin Umum (cadangan), opsional.
 
+Gunakan nomor aktif dengan WhatsApp. Jangan gunakan tanda `+`, spasi, atau tanda baca.
 
-### Perbaikan v0.9.1
-- Checkout membuat token akses tamu acak 256-bit (64 karakter heksadesimal) dan mengirimkannya melalui parameter `p_access_token` sesuai fungsi Supabase yang aktif.
-- Token disimpan lokal pada perangkat untuk mendukung fitur akses/penelusuran pesanan tamu berikutnya. Database hanya menyimpan hash SHA-256 token.
-- Tidak memerlukan migrasi SQL tambahan.
+## Pengujian
+- Isi nomor WhatsApp Putra dan Putri yang berbeda.
+- Buat pesanan percobaan dengan kategori Putra; pastikan tautan membuka chat nomor Putra.
+- Buat pesanan percobaan dengan kategori Putri; pastikan tautan membuka chat nomor Putri.
+- Pastikan pesan memuat nomor pesanan, identitas, rincian barang, total, rekening, dan instruksi mengirim bukti transfer melalui chat.
+- Pastikan pelanggan tetap harus menekan tombol Kirim di WhatsApp dan melampirkan bukti transfer sendiri.
+- Uji nomor cadangan dengan mengosongkan nomor salah satu jalur (gunakan pesanan percobaan).
+
+## Catatan penting
+- Tautan WhatsApp hanya membuka chat dengan teks yang sudah disiapkan. Aplikasi tidak mengirim pesan otomatis. Pelanggan harus menekan Kirim.
+- Konfirmasi pembayaran tetap dilakukan petugas melalui WhatsApp. Status pembayaran/pesanan di aplikasi dikelola petugas sesuai alur operasional.
+- Fitur token akses pesanan tamu dari v0.9.1 dan fitur kalender pengiriman tetap dipertahankan.
