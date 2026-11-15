@@ -38,6 +38,7 @@ function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [staffLoginOpen, setStaffLoginOpen] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState(
     isSupabaseConfigured ? 'checking' : 'missing-config'
   );
@@ -137,7 +138,7 @@ function App() {
   }
 
   function placeOrder() {
-    if (!identity.name.trim() || !identity.dorm || !identity.className || !identity.schedule) {
+    if (!identity.name.trim() || !identity.dorm || !identity.className) {
       setNotice('Lengkapi identitas santri dan jadwal terlebih dahulu.');
       return;
     }
@@ -162,7 +163,7 @@ function App() {
       `Kategori: ${identity.gender}`,
       `Asrama: ${identity.dorm}`,
       `Kelas: ${identity.className}`,
-      `Jadwal: ${identity.schedule}`,
+      `Jadwal pengiriman: ditentukan otomatis oleh admin`,
       '',
       '*Rincian pesanan:*',
       ...order.items.map(item => `- ${item.name} x${item.qty} = ${money(item.price * item.qty)}`),
@@ -194,20 +195,12 @@ function App() {
     return order.status === filter;
   });
 
-  if (authLoading) {
-    return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">و</div><h1>Warung Darul Ilmi</h1><p>Memeriksa sesi akun…</p></div></div>;
-  }
+  const isStaff = profile?.role === 'cashier' || profile?.role === 'super_admin';
+  const isAdmin = profile?.role === 'super_admin';
 
-  if (!session) {
-    return <AuthScreen />;
+  if (staffLoginOpen) {
+    return <AuthScreen onClose={() => setStaffLoginOpen(false)} />;
   }
-
-  if (!profile) {
-    return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">و</div><h1>Memuat profil</h1><p>Jika halaman ini terus muncul, periksa tabel profiles dan kebijakan RLS.</p><button className="primary" onClick={() => supabase.auth.signOut()}>Keluar</button></div></div>;
-  }
-
-  const isStaff = profile.role === 'cashier' || profile.role === 'super_admin';
-  const isAdmin = profile.role === 'super_admin';
 
   return <div className="app-shell">
     <header className="topbar">
@@ -220,18 +213,22 @@ function App() {
         {isStaff && <button className={page === 'cashier' ? 'active' : ''} onClick={() => setPage('cashier')}>Kasir</button>}
         {isAdmin && <button className={page === 'admin' ? 'active' : ''} onClick={() => setPage('admin')}>Super Admin</button>}
         {isAdmin && <button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}>Pengaturan</button>}
-        <span className="account-chip">{profile.full_name || session.user.email} · {profile.role}</span>
-        <button onClick={async () => { await supabase.auth.signOut(); setPage('order'); }}>Keluar</button>
+        {session && profile && <span className="account-chip">{profile.full_name || session.user.email} · {profile.role}</span>}
+        {session
+          ? <button onClick={async () => { await supabase.auth.signOut(); setProfile(null); setPage('order'); }}>Keluar</button>
+          : <button onClick={() => setStaffLoginOpen(true)}>Login Staf</button>}
       </nav>
     </header>
 
     <main className="main">
       <div className={`notice db-status db-${databaseStatus}`} role="status">
         {databaseStatus === 'checking' && 'Memeriksa koneksi database Supabase…'}
-        {databaseStatus === 'connected' && 'Terhubung ke Supabase. Login sudah memakai Supabase Auth; data pesanan masih tahap berikutnya untuk dipindahkan.'}
+        {databaseStatus === 'connected' && 'Terhubung ke Supabase. Login hanya diperlukan untuk kasir dan super admin; pesanan pelanggan masih tahap berikutnya untuk dipindahkan.'}
         {databaseStatus === 'missing-config' && 'Supabase belum dikonfigurasi. Buat .env.local dari .env.example dan isi URL serta publishable key.'}
         {databaseStatus === 'error' && 'Belum berhasil membaca database Supabase. Periksa URL, publishable key, dan tabel store_settings.'}
       </div>
+      {session && authLoading && <div className="notice">Memuat akses petugas…</div>}
+      {session && !authLoading && !profile && <div className="notice">Akun ini belum memiliki profil petugas yang valid. Hubungi super admin.</div>}
       {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Tutup pemberitahuan">×</button></div>}
 
       {page === 'order' && <section>
@@ -245,14 +242,14 @@ function App() {
 
         <div className="section-heading">
           <div><p className="eyebrow">LANGKAH 01</p><h2>Identitas pemesan</h2></div>
-          <span className="step-pill">Data santri</span>
+          <span className="step-pill">Tanpa login</span>
         </div>
         <div className="panel identity-grid">
           <label>Nama santri<input value={identity.name} onChange={e => setIdentity({ ...identity, name: e.target.value })} placeholder="Masukkan nama lengkap" /></label>
           <label>Kategori<select value={identity.gender} onChange={e => setIdentity({ ...identity, gender: e.target.value, dorm: '' })}><option>Putra</option><option>Putri</option></select></label>
           <label>Asrama<select value={identity.dorm} onChange={e => setIdentity({ ...identity, dorm: e.target.value })}><option value="">Pilih asrama</option>{(identity.gender === 'Putra' ? ['Asrama Putra 1', 'Asrama Putra 2'] : ['Asrama Putri 1', 'Asrama Putri 2']).map(x => <option key={x}>{x}</option>)}</select></label>
           <label>Kelas<select value={identity.className} onChange={e => setIdentity({ ...identity, className: e.target.value })}><option value="">Pilih kelas</option>{['Ibtidaiyah', 'Tsanawiyah', 'Aliyah', 'Lainnya'].map(x => <option key={x}>{x}</option>)}</select></label>
-          <label className="wide">Jadwal pengiriman<select value={identity.schedule} onChange={e => setIdentity({ ...identity, schedule: e.target.value })}><option value="">Pilih jadwal</option>{['Pagi', 'Siang', 'Sore', 'Malam'].map(x => <option key={x}>{x}</option>)}</select></label>
+          <div className="wide delivery-auto"><strong>Jadwal pengiriman</strong><span>Ditentukan otomatis oleh pengelola warung. Pelanggan tidak perlu memilih jadwal.</span></div>
         </div>
 
         <div className="section-heading menu-heading">
@@ -308,11 +305,9 @@ function App() {
   </div>;
 }
 
-function AuthScreen() {
-  const [mode, setMode] = useState('login');
+function AuthScreen({ onClose }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [fullName, setFullName] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -325,26 +320,14 @@ function AuthScreen() {
     }
     setBusy(true);
     try {
-      if (mode === 'register') {
-        const { data, error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: { data: { full_name: fullName.trim() } }
-        });
-        if (error) throw error;
-        setMessage(data.session
-          ? 'Pendaftaran berhasil. Profil pelanggan sudah dibuat.'
-          : 'Pendaftaran diterima. Periksa email untuk konfirmasi akun sebelum login.');
-        setMode('login');
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password
-        });
-        if (error) throw error;
-      }
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password
+      });
+      if (error) throw error;
+      onClose?.();
     } catch (error) {
-      setMessage(error.message || 'Terjadi kesalahan saat memproses akun.');
+      setMessage(error.message || 'Email atau password tidak berhasil diverifikasi.');
     } finally {
       setBusy(false);
     }
@@ -352,19 +335,16 @@ function AuthScreen() {
 
   return <div className="auth-screen">
     <form className="auth-card" onSubmit={submit}>
+      <button className="auth-close" type="button" onClick={onClose}>← Kembali ke katalog</button>
       <div className="brand-mark">و</div>
-      <p className="eyebrow">WARUNG DARUL ILMI</p>
-      <h1>{mode === 'login' ? 'Selamat datang kembali' : 'Buat akun pelanggan'}</h1>
-      <p className="auth-description">Masuk untuk melanjutkan pemesanan dan melihat informasi akun.</p>
-      {mode === 'register' && <label>Nama lengkap<input autoComplete="name" value={fullName} onChange={e => setFullName(e.target.value)} required placeholder="Nama lengkap" /></label>}
-      <label>Email<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="nama@email.com" /></label>
-      <label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="Minimal 6 karakter" /></label>
+      <p className="eyebrow">AREA KHUSUS PETUGAS</p>
+      <h1>Login kasir & admin</h1>
+      <p className="auth-description">Pelanggan tidak perlu login. Halaman ini hanya untuk kasir dan super admin.</p>
+      <label>Email<input type="email" autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} required placeholder="Email petugas" /></label>
+      <label>Password<input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} required placeholder="Password" /></label>
       {message && <div className="auth-message" role="status">{message}</div>}
-      <button className="primary full" type="submit" disabled={busy}>{busy ? 'Memproses…' : mode === 'login' ? 'Masuk' : 'Daftar akun'}</button>
-      <button className="auth-switch" type="button" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(''); }}>
-        {mode === 'login' ? 'Belum punya akun? Daftar pelanggan' : 'Sudah punya akun? Masuk'}
-      </button>
-      <p className="auth-footnote">Akun pelanggan yang mendaftar otomatis mendapat akses pelanggan. Akun kasir dan super admin ditetapkan oleh pengelola.</p>
+      <button className="primary full" type="submit" disabled={busy}>{busy ? 'Memproses…' : 'Masuk sebagai petugas'}</button>
+      <p className="auth-footnote">Akun kasir dan super admin dibuat serta diatur oleh pengelola.</p>
     </form>
   </div>;
 }
