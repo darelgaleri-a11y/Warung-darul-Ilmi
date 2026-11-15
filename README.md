@@ -1,51 +1,42 @@
-# Warung Darul Ilmi v0.6
+# Warung Darul Ilmi v0.7
 
-Melanjutkan v0.5 dengan pengaturan rekening, jadwal mingguan, dan pembatasan data kasir Putra/Putri di PostgreSQL Row Level Security (RLS).
+Melanjutkan v0.6. Versi ini menambahkan ruang distribusi/dapur dan laporan Excel asli (.xlsx).
 
-## PENTING SEBELUM MENJALANKAN
+## Sebelum memasang
 
-1. Simpan salinan folder v0.5.
-2. Jalankan `migration-v3-operations-security.sql` satu kali di Supabase SQL Editor, setelah migration v2 guest checkout berhasil.
-3. Pastikan minimal satu hari aktif pada `delivery_weekdays`, agar fungsi `next_delivery_date()` dapat menentukan tanggal.
-4. Setelah migration v3, setiap profil dengan role `cashier` wajib mempunyai `cashier_gender` bernilai `Putra` atau `Putri`.
-5. Salin `.env.local` milik v0.5 ke folder versi ini. Jangan pernah memasukkan `service_role`/secret key ke browser.
+1. Simpan folder v0.6 sebagai cadangan.
+2. Ekstrak folder versi ini ke lokasi baru.
+3. Salin `.env.local` dari v0.6 ke folder `warung-darul-ilmi` versi ini.
+4. Tidak ada migrasi SQL tambahan pada v0.7. Versi ini memakai tabel dan kebijakan yang sudah dibuat pada database v1, migrasi v2, dan migrasi v3.
+5. Jangan pernah menaruh `service_role`/secret key di `.env.local` frontend. Gunakan hanya URL dan publishable/anon key.
 
-## Mengatur jalur akun kasir
-
-Buat akun kasir melalui Supabase Authentication terlebih dahulu. Lalu jalankan SQL berikut di SQL Editor, ganti email dan jalur sesuai petugas:
-
-```sql
-update public.profiles
-set role = 'cashier', cashier_gender = 'Putra'
-where id = (select id from auth.users where email = 'email-kasir-putra@example.com');
-
-update public.profiles
-set role = 'cashier', cashier_gender = 'Putri'
-where id = (select id from auth.users where email = 'email-kasir-putri@example.com');
-```
-
-Untuk Super Admin, role tetap `super_admin`. Kasir tidak dapat mengubah sendiri role atau jalur aksesnya. RLS membatasi pesanan, item, catatan pembayaran, dan riwayat sesuai gender yang ditugaskan.
-
-## Menjalankan aplikasi
+## Menjalankan
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Perubahan v0.6
+Untuk pemeriksaan build produksi:
 
-- Super Admin dapat menyimpan nama toko, WhatsApp, nama bank, nomor rekening, nama pemilik rekening, dan instruksi transfer.
-- Informasi rekening ditampilkan kepada pelanggan dan dapat disertakan pada pesan WhatsApp pesanan.
-- Super Admin dapat mengaktifkan/nonaktifkan hari pengiriman mingguan.
-- Halaman pelanggan menampilkan perkiraan tanggal pengiriman terdekat dari fungsi database.
-- Kasir menampilkan jalur gender yang ditugaskan.
-- RLS di database membatasi akses kasir untuk pesanan sesuai `cashier_gender`, termasuk item pesanan, pembayaran, dan riwayat.
+```bash
+npm run build
+```
 
-## Batasan yang masih ada
+## Fitur v0.7
 
-- Bukti transfer belum mempunyai alur upload ke Supabase Storage.
-- Pengelolaan pengecualian tanggal khusus (misalnya hari libur) belum disediakan di UI; tabel `delivery_date_overrides` sudah tersedia dari database v1.
-- Distribusi, cetak tiket dapur, penyelesaian shift, dan ekspor XLSX asli masih perlu dikerjakan.
-- Belum dilakukan uji beban 1.000 pengguna bersamaan.
-- Build perlu diuji di komputer pengembang dengan `npm install` dan `npm run build` sebelum dipakai operasional.
+- Menu **Distribusi & Dapur** untuk staf dan Super Admin.
+- Filter pesanan berdasarkan tanggal pengiriman dan kategori Putra/Putri.
+- Rekap jumlah pesanan, jumlah item, dan nilai pesanan pada tanggal terpilih.
+- Pengelompokan pesanan berdasarkan kategori santri dan asrama.
+- Cetak tiket dapur per pesanan atau seluruh pesanan yang sedang difilter.
+- Tombol tandai pesanan sudah diserahkan; perubahan disimpan ke tabel `orders` dan tetap tunduk pada RLS.
+- Ekspor laporan `.xlsx` dengan dua lembar: `Pesanan` dan `Rincian Item`.
+
+## Catatan
+
+- Cetak tiket menggunakan dialog cetak browser. Izinkan pop-up untuk situs aplikasi jika browser memblokir jendela cetak.
+- Data distribusi mengikuti pesanan yang berhasil dimuat oleh akun yang sedang login. Kasir Putra/Putri tetap dibatasi oleh RLS.
+- Ekspor XLSX memuat data yang tersedia pada daftar pesanan aplikasi (maksimal 300 pesanan terakhir pada query saat ini). Untuk laporan periode panjang, perlu fitur filter periode/paginasi pada iterasi berikutnya.
+- Upload bukti transfer pelanggan belum termasuk v0.7. Akan dibuat pada iterasi berikutnya dengan token akses pesanan tamu agar bukti transfer tidak dapat dilihat atau diganti oleh orang lain.
+- Belum ada uji beban 1.000 pengguna bersamaan. Jalankan `npm run build` dan uji alur di staging sebelum penggunaan operasional.
