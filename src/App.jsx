@@ -35,6 +35,9 @@ function App() {
     name: '', gender: 'Putra', dorm: '', className: '', schedule: ''
   });
   const [notice, setNotice] = useState('');
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [databaseStatus, setDatabaseStatus] = useState(
     isSupabaseConfigured ? 'checking' : 'missing-config'
   );
@@ -62,6 +65,52 @@ function App() {
     checkDatabase();
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (active) {
+        setSession(data.session);
+        setAuthLoading(false);
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (active) {
+        setSession(nextSession);
+        setProfile(null);
+      }
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function loadProfile() {
+      if (!session?.user?.id || !supabase) {
+        setProfile(null);
+        return;
+      }
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, role')
+        .eq('id', session.user.id)
+        .single();
+      if (!active) return;
+      setProfile(error ? null : data);
+    }
+    loadProfile();
+    return () => { active = false; };
+  }, [session?.user?.id]);
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(orders)), [orders]);
   useEffect(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)), [settings]);
@@ -145,6 +194,21 @@ function App() {
     return order.status === filter;
   });
 
+  if (authLoading) {
+    return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">و</div><h1>Warung Darul Ilmi</h1><p>Memeriksa sesi akun…</p></div></div>;
+  }
+
+  if (!session) {
+    return <AuthScreen />;
+  }
+
+  if (!profile) {
+    return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">و</div><h1>Memuat profil</h1><p>Jika halaman ini terus muncul, periksa tabel profiles dan kebijakan RLS.</p><button className="primary" onClick={() => supabase.auth.signOut()}>Keluar</button></div></div>;
+  }
+
+  const isStaff = profile.role === 'cashier' || profile.role === 'super_admin';
+  const isAdmin = profile.role === 'super_admin';
+
   return <div className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={() => setPage('order')} aria-label="Ke halaman pemesanan">
@@ -153,16 +217,18 @@ function App() {
       </button>
       <nav className="nav">
         <button className={page === 'order' ? 'active' : ''} onClick={() => setPage('order')}>Pemesanan</button>
-        <button className={page === 'cashier' ? 'active' : ''} onClick={() => setPage('cashier')}>Kasir</button>
-        <button className={page === 'admin' ? 'active' : ''} onClick={() => setPage('admin')}>Super Admin</button>
-        <button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}>Pengaturan</button>
+        {isStaff && <button className={page === 'cashier' ? 'active' : ''} onClick={() => setPage('cashier')}>Kasir</button>}
+        {isAdmin && <button className={page === 'admin' ? 'active' : ''} onClick={() => setPage('admin')}>Super Admin</button>}
+        {isAdmin && <button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}>Pengaturan</button>}
+        <span className="account-chip">{profile.full_name || session.user.email} · {profile.role}</span>
+        <button onClick={async () => { await supabase.auth.signOut(); setPage('order'); }}>Keluar</button>
       </nav>
     </header>
 
     <main className="main">
       <div className={`notice db-status db-${databaseStatus}`} role="status">
         {databaseStatus === 'checking' && 'Memeriksa koneksi database Supabase…'}
-        {databaseStatus === 'connected' && 'Terhubung ke Supabase. Tahap ini baru menguji koneksi; pesanan masih menggunakan penyimpanan lokal.'}
+        {databaseStatus === 'connected' && 'Terhubung ke Supabase. Login sudah memakai Supabase Auth; data pesanan masih tahap berikutnya untuk dipindahkan.'}
         {databaseStatus === 'missing-config' && 'Supabase belum dikonfigurasi. Buat .env.local dari .env.example dan isi URL serta publishable key.'}
         {databaseStatus === 'error' && 'Belum berhasil membaca database Supabase. Periksa URL, publishable key, dan tabel store_settings.'}
       </div>
@@ -210,14 +276,14 @@ function App() {
         </div>
       </section>}
 
-      {page === 'cashier' && <section>
+      {page === 'cashier' && isStaff && <section>
         <div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Dashboard kasir</h1><p className="muted">Kelola antrean pesanan putra dan putri. Data saat ini tersimpan di browser ini.</p></div>
         <div className="stats"><div className="stat-card"><small>Total pesanan</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Menunggu pembayaran</small><strong>{orders.filter(o => o.paymentStatus !== 'Lunas').length}</strong></div><div className="stat-card"><small>Pesanan lunas</small><strong>{orders.filter(o => o.paymentStatus === 'Lunas').length}</strong></div></div>
         <div className="toolbar"><h2>Antrean pesanan</h2><select value={filter} onChange={e => setFilter(e.target.value)}><option>Semua</option><option>Putra</option><option>Putri</option><option>Menunggu konfirmasi WhatsApp</option><option>Diproses</option><option>Siap diambil</option><option>Selesai</option></select></div>
         <OrderList orders={filteredOrders} onStatus={updateStatus} onPayment={updatePayment} />
       </section>}
 
-      {page === 'admin' && <section>
+      {page === 'admin' && isAdmin && <section>
         <div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Ringkasan super admin</h1><p className="muted">Rekap gabungan seluruh pesanan yang tersimpan di browser ini.</p></div>
         <div className="stats">
           <div className="stat-card"><small>Jumlah transaksi</small><strong>{orders.length}</strong></div>
@@ -228,7 +294,7 @@ function App() {
         <h2 className="subheading">Riwayat transaksi</h2><OrderList orders={orders} onStatus={updateStatus} onPayment={updatePayment} />
       </section>}
 
-      {page === 'settings' && <section>
+      {page === 'settings' && isAdmin && <section>
         <div className="page-intro"><p className="eyebrow">KONFIGURASI</p><h1>Pengaturan aplikasi</h1><p className="muted">Lengkapi nomor WhatsApp tujuan pesanan.</p></div>
         <div className="panel settings-panel">
           <label>Nomor WhatsApp admin<input inputMode="numeric" value={settings.wa} onChange={e => setSettings({ ...settings, wa: e.target.value })} placeholder="Contoh format: 6281234567890" /></label>
@@ -239,6 +305,67 @@ function App() {
       </section>}
     </main>
     <footer><span className="footer-mark">و</span><div><strong>Warung Darul Ilmi</strong><small>Versi awal · Untuk pengujian lokal</small></div><span className="footer-note">بِسْمِ اللَّهِ</span></footer>
+  </div>;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setMessage('');
+    if (!supabase) {
+      setMessage('Konfigurasi Supabase belum ditemukan. Periksa file .env.local.');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (mode === 'register') {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { data: { full_name: fullName.trim() } }
+        });
+        if (error) throw error;
+        setMessage(data.session
+          ? 'Pendaftaran berhasil. Profil pelanggan sudah dibuat.'
+          : 'Pendaftaran diterima. Periksa email untuk konfirmasi akun sebelum login.');
+        setMode('login');
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password
+        });
+        if (error) throw error;
+      }
+    } catch (error) {
+      setMessage(error.message || 'Terjadi kesalahan saat memproses akun.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="auth-screen">
+    <form className="auth-card" onSubmit={submit}>
+      <div className="brand-mark">و</div>
+      <p className="eyebrow">WARUNG DARUL ILMI</p>
+      <h1>{mode === 'login' ? 'Selamat datang kembali' : 'Buat akun pelanggan'}</h1>
+      <p className="auth-description">Masuk untuk melanjutkan pemesanan dan melihat informasi akun.</p>
+      {mode === 'register' && <label>Nama lengkap<input autoComplete="name" value={fullName} onChange={e => setFullName(e.target.value)} required placeholder="Nama lengkap" /></label>}
+      <label>Email<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="nama@email.com" /></label>
+      <label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="Minimal 6 karakter" /></label>
+      {message && <div className="auth-message" role="status">{message}</div>}
+      <button className="primary full" type="submit" disabled={busy}>{busy ? 'Memproses…' : mode === 'login' ? 'Masuk' : 'Daftar akun'}</button>
+      <button className="auth-switch" type="button" onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(''); }}>
+        {mode === 'login' ? 'Belum punya akun? Daftar pelanggan' : 'Sudah punya akun? Masuk'}
+      </button>
+      <p className="auth-footnote">Akun pelanggan yang mendaftar otomatis mendapat akses pelanggan. Akun kasir dan super admin ditetapkan oleh pengelola.</p>
+    </form>
   </div>;
 }
 
