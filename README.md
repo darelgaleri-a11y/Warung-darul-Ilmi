@@ -1,55 +1,51 @@
-# Warung Darul Ilmi v0.5
+# Warung Darul Ilmi v0.6
 
-Versi ini melanjutkan fondasi React + Vite + Supabase dari v0.4 dan mulai menghubungkan katalog, checkout tamu, antrean kasir, status pesanan, serta pengaturan WhatsApp.
+Melanjutkan v0.5 dengan pengaturan rekening, jadwal mingguan, dan pembatasan data kasir Putra/Putri di PostgreSQL Row Level Security (RLS).
 
-## Sebelum menjalankan
+## PENTING SEBELUM MENJALANKAN
 
-1. Pastikan SQL Database v1 sudah dijalankan pada proyek Supabase.
-2. Jalankan `migration-v2-guest-checkout.sql` satu kali melalui Supabase SQL Editor. File ini juga tersedia terpisah.
-3. Pastikan ada produk aktif pada tabel `products` dan kategori aktif pada `categories`.
-4. Pastikan akun petugas sudah ada di Authentication dan profilnya memiliki role `cashier` atau `super_admin`.
-5. Salin `.env.example` menjadi `.env.local`, lalu isi URL dan publishable key Supabase.
+1. Simpan salinan folder v0.5.
+2. Jalankan `migration-v3-operations-security.sql` satu kali di Supabase SQL Editor, setelah migration v2 guest checkout berhasil.
+3. Pastikan minimal satu hari aktif pada `delivery_weekdays`, agar fungsi `next_delivery_date()` dapat menentukan tanggal.
+4. Setelah migration v3, setiap profil dengan role `cashier` wajib mempunyai `cashier_gender` bernilai `Putra` atau `Putri`.
+5. Salin `.env.local` milik v0.5 ke folder versi ini. Jangan pernah memasukkan `service_role`/secret key ke browser.
 
-Contoh `.env.local`:
+## Mengatur jalur akun kasir
 
-```env
-VITE_SUPABASE_URL=https://PROJECT-REF.supabase.co
-VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxx
+Buat akun kasir melalui Supabase Authentication terlebih dahulu. Lalu jalankan SQL berikut di SQL Editor, ganti email dan jalur sesuai petugas:
+
+```sql
+update public.profiles
+set role = 'cashier', cashier_gender = 'Putra'
+where id = (select id from auth.users where email = 'email-kasir-putra@example.com');
+
+update public.profiles
+set role = 'cashier', cashier_gender = 'Putri'
+where id = (select id from auth.users where email = 'email-kasir-putri@example.com');
 ```
 
-Jangan pernah memasukkan `service_role` atau secret key ke aplikasi browser.
+Untuk Super Admin, role tetap `super_admin`. Kasir tidak dapat mengubah sendiri role atau jalur aksesnya. RLS membatasi pesanan, item, catatan pembayaran, dan riwayat sesuai gender yang ditugaskan.
 
-## Menjalankan
+## Menjalankan aplikasi
 
 ```bash
 npm install
 npm run dev
 ```
 
-Buka alamat lokal yang ditampilkan Vite. Jika `.env.local` diubah, hentikan server dengan Ctrl+C lalu jalankan kembali `npm run dev`.
+## Perubahan v0.6
 
-## Yang sudah diintegrasikan pada v0.5
+- Super Admin dapat menyimpan nama toko, WhatsApp, nama bank, nomor rekening, nama pemilik rekening, dan instruksi transfer.
+- Informasi rekening ditampilkan kepada pelanggan dan dapat disertakan pada pesan WhatsApp pesanan.
+- Super Admin dapat mengaktifkan/nonaktifkan hari pengiriman mingguan.
+- Halaman pelanggan menampilkan perkiraan tanggal pengiriman terdekat dari fungsi database.
+- Kasir menampilkan jalur gender yang ditugaskan.
+- RLS di database membatasi akses kasir untuk pesanan sesuai `cashier_gender`, termasuk item pesanan, pembayaran, dan riwayat.
 
-- Katalog kategori dan produk dibaca dari Supabase.
-- Checkout pelanggan tanpa akun menggunakan RPC `create_guest_order`.
-- Nama/nomor pesanan, total, dan tanggal pengiriman berasal dari hasil database.
-- Pesanan baru diteruskan ke WhatsApp setelah penyimpanan database berhasil (jika nomor WhatsApp sudah diatur).
-- Kasir dan super admin membaca daftar pesanan online.
-- Status pesanan dan status pembayaran diperbarui di tabel `orders`.
-- Super Admin melihat rekap Putra/Putri dan mengekspor CSV yang dapat dibuka di Excel.
-- Nomor WhatsApp toko dapat disimpan ke `store_settings`.
+## Batasan yang masih ada
 
-## Batasan yang masih diketahui
-
-- Data rekening belum tersedia di skema database v1; jangan menganggap bagian rekening sudah aktif.
-- Pengaturan cut-off dan distribusi terjadwal belum diimplementasikan.
-- Pemisahan akses kasir Putra/Putri belum ditegakkan di tingkat database. Saat ini kasir dapat memfilter kedua kategori; perlu migrasi role/scope kasir sebelum dipakai operasional.
-- Bukti transfer belum diunggah dan payment gateway belum terhubung. Verifikasi pembayaran masih manual dengan mengubah status oleh staf.
-- Ekspor saat ini CSV kompatibel Excel, belum file XLSX asli.
-- Realtime bergantung pada konfigurasi Supabase Realtime untuk tabel `orders`; tombol muat ulang tetap tersedia.
-- Enam HTML asli merupakan acuan desain dan alur. Versi ini belum mereplikasi semua detail visual dan seluruh fitur adminnya.
-- Belum diuji untuk 1.000 pengguna aktif bersamaan. Lakukan uji beban dan penyesuaian infrastruktur sebelum peluncuran besar.
-
-## Keamanan
-
-Gunakan Supabase publishable key saja pada frontend. Kebijakan RLS dan fungsi RPC menjadi batas keamanan utama. Uji akun anon, kasir, dan super admin sebelum membuka aplikasi untuk umum.
+- Bukti transfer belum mempunyai alur upload ke Supabase Storage.
+- Pengelolaan pengecualian tanggal khusus (misalnya hari libur) belum disediakan di UI; tabel `delivery_date_overrides` sudah tersedia dari database v1.
+- Distribusi, cetak tiket dapur, penyelesaian shift, dan ekspor XLSX asli masih perlu dikerjakan.
+- Belum dilakukan uji beban 1.000 pengguna bersamaan.
+- Build perlu diuji di komputer pengembang dengan `npm install` dan `npm run build` sebelum dipakai operasional.

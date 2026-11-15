@@ -26,3 +26,5 @@ button:disabled{opacity:.6;cursor:wait}
 .delivery-auto strong{font-size:12px;color:#214738}
 .delivery-auto span{font-size:11px;line-height:1.5;color:#7c877e}
 .auth-close{align-self:flex-start;border:0;background:transparent;color:#315b49;font-size:12px;font-weight:700;cursor:pointer;padding:4px 0}
+
+.payment-info{margin:18px 0;background:#fffefa;border-color:#d9cba5}.payment-info strong{color:#174737;font-size:13px}.payment-info p{font-size:12px;margin:8px 0;color:#42564b}.payment-info small{font-size:11px;color:#78857b;line-height:1.6}.settings-panel{display:grid;gap:13px;margin:18px 0}.settings-panel h2{font:600 21px 'Playfair Display';color:#173e32;margin:0 0 5px}.settings-panel label{max-width:100%}.settings-panel textarea,.cart-panel textarea{width:100%;min-height:85px;border:1px solid #dddccd;background:#fff;border-radius:9px;padding:10px 12px;font:500 13px 'DM Sans';color:#24382f;resize:vertical}
