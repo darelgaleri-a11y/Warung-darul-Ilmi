@@ -1,40 +1,53 @@
-# Warung Darul Ilmi v1.1.1 — Perbaikan Kasir, Distribusi & Laporan
+# Warung Darul Ilmi v1.2 — Perbaikan pemisahan kasir dan operasional
 
-## Perbaikan dari v1.1
-- Query antrean kasir diberi pembatas `guest_gender` sesuai `profiles.cashier_gender`, selain tetap dilindungi RLS Supabase. Kasir tanpa jalur Putra/Putri akan ditolak dari pemuatan antrean (fail-closed) dan mendapat petunjuk pengaturan.
-- Statistik kasir dan halaman distribusi menggunakan data yang sudah dibatasi sesuai jalur kasir. Super Admin tetap melihat kedua jalur.
-- Kasir tidak dapat mengubah pesanan dari jalur lain melalui antarmuka; server tetap menjadi pengaman utama melalui RLS.
-- Filter tanggal dan kategori distribusi tetap tersedia; daftar dikelompokkan secara konsisten menurut Putra/Putri dan asrama.
-- Pengamanan tambahan mencegah pesanan ditandai diserahkan sebelum status `ready`.
-- Pencetakan tiket dapur menggunakan hasil filter tanggal dan kategori yang sedang dipilih.
-- Ekspor Excel memiliki tiga lembar: Pesanan, Rincian Item, dan Ringkasan Putra/Putri.
-- Pemuatan pesanan menggunakan pagination hingga 20.000 baris agar laporan tidak berhenti diam-diam pada 300 pesanan.
-- Alur pembayaran tetap melalui WhatsApp: pelanggan mengirim bukti transfer di chat dan kasir memeriksanya di WhatsApp. Aplikasi tidak mengunggah atau memverifikasi bukti transfer.
+## Fokus perbaikan
+- Pemisahan jalur Kasir Putra/Putri diperketat di database melalui migration v5. Migration menghapus seluruh policy lama pada `orders` dan `order_items` sebelum membuat policy baru yang membatasi berdasarkan profil kasir. Ini mencegah policy lama yang bersifat permisif membuka data lintas jalur.
+- Super Admin tetap dapat melihat kedua jalur.
+- Super Admin dapat menetapkan jalur akun kasir melalui Pengaturan → Pembagian akun kasir. Tidak perlu mengedit tabel `profiles` secara manual.
+- Normalisasi gender menangani spasi dan perbedaan kapitalisasi.
+- Halaman Dapur & Distribusi otomatis memilih tanggal pengiriman yang memang memiliki pesanan (tanggal mendatang terdekat; jika tidak ada, tanggal pesanan terbaru). Kasir hanya dapat memilih jalurnya sendiri.
+- Filter tanggal dan kategori memengaruhi daftar, statistik, pengelompokan asrama, serta cetak tiket.
+- Cetak tiket menggunakan iframe tersembunyi sehingga tidak bergantung pada izin popup browser.
+- Ekspor Excel memiliki filter rentang tanggal dan tiga lembar: Pesanan, Rincian Item, Ringkasan Putra/Putri.
+- Pembayaran dan pengiriman bukti transfer tetap dilakukan melalui WhatsApp. Tidak ada unggah bukti transfer atau verifikasi pembayaran di aplikasi.
 
-## Instalasi / pembaruan
-1. Ekstrak ZIP ke folder baru, jangan menimpa v1.1.
-2. Salin `.env.local` dari folder v1.1.
-3. Buka folder baru melalui VS Code.
-4. Jalankan `npm install`, lalu `npm run dev`.
+## Instalasi
+1. Ekstrak ZIP ke folder baru, jangan menimpa v1.1.1.
+2. Salin `.env.local` dari folder v1.1.1.
+3. Buka folder baru di VS Code.
+4. Jalankan `npm install` lalu `npm run dev`.
 
-## Database
-Tidak memerlukan migrasi SQL baru. Pertahankan migrasi v1 sampai v4 yang sudah berhasil dijalankan. Jangan jalankan ulang migrasi tersebut.
+## Migrasi database wajib
+1. Buka Supabase → SQL Editor → New query.
+2. Buka file `migration-v5-cashier-scope-hardening.sql` di folder ini.
+3. Salin seluruh isinya dan jalankan SATU KALI.
+4. Pastikan hasilnya `Success`.
 
-## Penting: pengaturan jalur kasir
-Di Supabase Table Editor → `profiles`, pastikan setiap akun `cashier` memiliki `cashier_gender` yang tepat: `Putra` atau `Putri`. Akun `super_admin` tidak perlu nilai ini. Jangan mengubah role akun melalui aplikasi pelanggan.
+Migrasi v5 tidak menghapus data pesanan. Ia mengganti policy RLS pada `orders` dan `order_items` agar tidak ada policy lama yang membuka data lintas jalur. Jangan jalankan migrasi v5 berulang-ulang tanpa alasan.
 
-## Checklist pengujian
-- Login Kasir Putra hanya menampilkan pesanan Putra pada antrean dan distribusi.
-- Login Kasir Putri hanya menampilkan pesanan Putri pada antrean dan distribusi.
-- Akun kasir tanpa `cashier_gender` tidak memperoleh antrean sampai diperbaiki Super Admin.
-- Super Admin melihat pesanan Putra dan Putri serta dapat memfilter masing-masing.
-- Filter tanggal pengiriman dan kategori santri pada distribusi mengubah daftar dan statistik.
-- Pesanan dikelompokkan berdasarkan kategori santri dan asrama.
-- Cetak semua tiket dan cetak tiket satu pesanan berhasil. Jika popup diblokir, izinkan popup untuk situs aplikasi.
-- Tombol penyerahan nonaktif sebelum status `Siap diserahkan` dan aktif sesudahnya.
-- Ekspor Excel menghasilkan tiga lembar dan jumlahnya sesuai data yang tampil.
-- Pelanggan mengirim bukti transfer melalui WhatsApp; tidak ada unggah bukti ke aplikasi.
-- Kasir memeriksa transfer di WhatsApp dan mengubah status operasional melalui aplikasi.
+## Setelah migrasi
+1. Login sebagai Super Admin.
+2. Buka Pengaturan → Pembagian akun kasir.
+3. Atur akun kasir masing-masing menjadi Kasir Putra atau Kasir Putri.
+4. Logout, lalu login menggunakan akun masing-masing kasir.
+5. Pastikan Kasir Putra hanya melihat pesanan Putra dan Kasir Putri hanya melihat pesanan Putri.
 
-## Catatan verifikasi
-Build produksi perlu dijalankan pada komputer pengguna dengan `npm run build`. Pada lingkungan pembuatan paket ini, pemasangan dependensi mengalami timeout sehingga build produksi belum dapat dikonfirmasi di sini.
+## Checklist uji wajib
+- [ ] Jalankan migrasi v5 sekali dan pastikan `Success`.
+- [ ] Super Admin dapat melihat daftar akun kasir pada Pengaturan.
+- [ ] Atur satu akun ke Putra dan satu akun ke Putri.
+- [ ] Kasir Putra hanya melihat pesanan Putra di antrean dan distribusi.
+- [ ] Kasir Putri hanya melihat pesanan Putri di antrean dan distribusi.
+- [ ] Super Admin tetap melihat kedua jalur.
+- [ ] Distribusi otomatis memilih tanggal yang memiliki pesanan.
+- [ ] Ganti tanggal distribusi; daftar dan statistik ikut berubah.
+- [ ] Filter kategori Putra/Putri berfungsi untuk Super Admin.
+- [ ] Pesanan dikelompokkan berdasarkan gender dan asrama.
+- [ ] Cetak semua tiket dan cetak satu tiket berfungsi.
+- [ ] Tombol serahkan nonaktif sebelum status Siap diserahkan dan aktif setelahnya.
+- [ ] Ekspor Excel menghasilkan tiga lembar.
+- [ ] Coba rentang tanggal laporan dan cocokkan jumlah pesanan.
+- [ ] Pembayaran dan bukti transfer tetap berlangsung melalui WhatsApp.
+
+## Catatan
+Build produksi harus diverifikasi dengan `npm run build` di komputer pengguna. Jangan menggunakan v1.1.1 untuk operasional sampai pemisahan kasir dan alur distribusi v1.2 lolos pengujian.
