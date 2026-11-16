@@ -318,11 +318,34 @@ function App() {
     if (!isAdmin) { setNotice('Ekspor laporan hanya tersedia untuk Super Admin.'); return; }
     if (!reportOrders.length) { setNotice('Tidak ada pesanan pada rentang tanggal laporan yang dipilih.'); return; }
     try {
-    const orderRows = reportOrders.map(o => ({ 'Nomor Pesanan':o.number, 'Tanggal Pesan':new Date(o.createdAt).toLocaleString('id-ID'), 'Tanggal Kirim':o.deliveryDate, 'Nama':o.customer.name, 'Kategori':o.customer.gender, 'Asrama':o.customer.dorm, 'Kelas':o.customer.className, 'WhatsApp':o.customer.phone, 'Total':o.total, 'Status Pesanan':statusLabels[o.status] || o.status, 'Catatan':o.note }));
+    // Sheet Pesanan berbentuk matriks: satu baris per transaksi santri,
+    // tiga kolom identitas di depan, lalu satu kolom untuk setiap produk.
+    // Qty 0 berarti produk tersebut tidak dipesan oleh santri pada transaksi itu.
+    const productNames = [...new Set(reportOrders.flatMap(o => o.items.map(i => String(i.name || '').trim()).filter(Boolean)))]
+      .sort((a, b) => a.localeCompare(b, 'id'));
+    const matrixHeaders = ['Nama Santri', 'Kelas', 'Asrama', 'Kategori', 'Tanggal Pengiriman', 'Nomor Pesanan', ...productNames, 'Total Pesanan', 'Status Pesanan'];
+    const matrixRows = [matrixHeaders];
+    for (const order of reportOrders) {
+      const quantities = new Map();
+      for (const item of order.items) {
+        const name = String(item.name || '').trim();
+        if (name) quantities.set(name, (quantities.get(name) || 0) + Number(item.qty || 0));
+      }
+      matrixRows.push([
+        order.customer.name || '', order.customer.className || '', order.customer.dorm || '',
+        order.customer.gender || '', order.deliveryDate || '', order.number || '',
+        ...productNames.map(name => quantities.get(name) || 0),
+        Number(order.total || 0), statusLabels[order.status] || order.status || ''
+      ]);
+    }
     const itemRows = reportOrders.flatMap(o => o.items.map(i => ({ 'Nomor Pesanan':o.number, 'Tanggal Kirim':o.deliveryDate, 'Nama Santri':o.customer.name, 'Kategori':o.customer.gender, 'Asrama':o.customer.dorm, 'Kelas':o.customer.className, 'Produk':i.name, 'Jumlah':i.qty, 'Harga Satuan':i.price, 'Subtotal':i.price*i.qty })));
     const summaryRows = ['Putra','Putri'].map(gender => { const rows=reportOrders.filter(o=>o.customer.gender===gender); return {'Kategori':gender,'Jumlah Pesanan':rows.length,'Jumlah Item':rows.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0),'Nilai Pesanan':rows.reduce((n,o)=>n+o.total,0),'Sudah Diserahkan':rows.filter(o=>o.status==='delivered').length,'Belum Selesai':rows.filter(o=>!['delivered','cancelled'].includes(o.status)).length}; });
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(orderRows), 'Pesanan');
+    const orderSheet = XLSX.utils.aoa_to_sheet(matrixRows);
+    orderSheet['!cols'] = matrixHeaders.map((header, index) => ({ wch: index === 0 ? 26 : index < 3 ? 18 : header.length > 22 ? 22 : Math.max(14, header.length + 2) }));
+    orderSheet['!freeze'] = { xSplit: 3, ySplit: 1, topLeftCell: 'D2', activePane: 'bottomRight', state: 'frozen' };
+    orderSheet['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:matrixRows.length-1,c:matrixHeaders.length-1}}) };
+    XLSX.utils.book_append_sheet(wb, orderSheet, 'Pesanan');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemRows.length ? itemRows : [{'Informasi':'Belum ada rincian item'}]), 'Rincian Item');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'Ringkasan');
     const fileName = `laporan-warung-darul-ilmi-${reportFrom || 'awal'}-${reportTo || 'terkini'}.xlsx`;

@@ -1,4 +1,4 @@
-# Warung Darul Ilmi v1.2 — Perbaikan pemisahan kasir dan operasional
+# Warung Darul Ilmi v1.2.1 — Format matriks laporan Excel
 
 ## Fokus perbaikan
 - Pemisahan jalur Kasir Putra/Putri diperketat di database melalui migration v5. Migration menghapus seluruh policy lama pada `orders` dan `order_items` sebelum membuat policy baru yang membatasi berdasarkan profil kasir. Ini mencegah policy lama yang bersifat permisif membuka data lintas jalur.
@@ -8,7 +8,9 @@
 - Halaman Dapur & Distribusi otomatis memilih tanggal pengiriman yang memang memiliki pesanan (tanggal mendatang terdekat; jika tidak ada, tanggal pesanan terbaru). Kasir hanya dapat memilih jalurnya sendiri.
 - Filter tanggal dan kategori memengaruhi daftar, statistik, pengelompokan asrama, serta cetak tiket.
 - Cetak tiket menggunakan iframe tersembunyi sehingga tidak bergantung pada izin popup browser.
-- Ekspor Excel memiliki filter rentang tanggal dan tiga lembar: Pesanan, Rincian Item, Ringkasan Putra/Putri.
+- Ekspor Excel memiliki filter rentang tanggal dan tiga lembar: Pesanan (format matriks santri × produk), Rincian Item, dan Ringkasan Putra/Putri.
+- Lembar Pesanan menampilkan satu baris per pesanan santri: Nama Santri, Kelas, Asrama, Kategori, Tanggal Pengiriman, Nomor Pesanan, lalu kolom dinamis per produk. Isi sel berupa jumlah item; angka 0 berarti produk tidak dipesan. Total dan status pesanan ditempatkan di kolom paling kanan.
+- Lembar Rincian Item dan Ringkasan dipertahankan seperti versi 1.2.
 - Pembayaran dan pengiriman bukti transfer tetap dilakukan melalui WhatsApp. Tidak ada unggah bukti transfer atau verifikasi pembayaran di aplikasi.
 
 ## Instalasi
@@ -17,20 +19,18 @@
 3. Buka folder baru di VS Code.
 4. Jalankan `npm install` lalu `npm run dev`.
 
-## Migrasi database wajib
-1. Buka Supabase → SQL Editor → New query.
-2. Buka file `migration-v5-cashier-scope-hardening.sql` di folder ini.
-3. Salin seluruh isinya dan jalankan SATU KALI.
-4. Pastikan hasilnya `Success`.
+## Database
+Tidak ada migrasi SQL baru pada v1.2.1. Gunakan database yang sudah berhasil dipasang dan diuji pada v1.2. Jangan jalankan ulang migrasi v1–v5.
 
-Migrasi v5 tidak menghapus data pesanan. Ia mengganti policy RLS pada `orders` dan `order_items` agar tidak ada policy lama yang membuka data lintas jalur. Jangan jalankan migrasi v5 berulang-ulang tanpa alasan.
-
-## Setelah migrasi
-1. Login sebagai Super Admin.
-2. Buka Pengaturan → Pembagian akun kasir.
-3. Atur akun kasir masing-masing menjadi Kasir Putra atau Kasir Putri.
-4. Logout, lalu login menggunakan akun masing-masing kasir.
-5. Pastikan Kasir Putra hanya melihat pesanan Putra dan Kasir Putri hanya melihat pesanan Putri.
+## Checklist uji v1.2.1
+- [ ] Buka Super Admin → Ringkasan → pilih rentang tanggal yang berisi pesanan.
+- [ ] Klik Ekspor Excel.
+- [ ] Pada lembar Pesanan, pastikan kolom pertama adalah Nama Santri, Kelas, dan Asrama.
+- [ ] Pastikan setiap produk yang muncul dalam rentang laporan memiliki kolom sendiri.
+- [ ] Pastikan angka pada kolom produk cocok dengan jumlah yang dipesan oleh santri. Produk yang tidak dipesan berisi 0.
+- [ ] Pastikan satu transaksi menghasilkan satu baris; transaksi santri yang sama pada nomor pesanan berbeda tetap menjadi baris terpisah.
+- [ ] Pastikan filter tanggal memengaruhi hasil ekspor.
+- [ ] Pastikan lembar Rincian Item dan Ringkasan tetap benar.
 
 ## Checklist uji wajib
 - [ ] Jalankan migrasi v5 sekali dan pastikan `Success`.
