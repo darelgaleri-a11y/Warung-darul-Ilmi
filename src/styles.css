@@ -109,3 +109,11 @@ button:disabled{opacity:.6;cursor:wait}
 .password-confirm-panel{display:grid;gap:10px;padding:15px;border:1px solid #e4d8b9;background:#f8f4e8;border-radius:12px;margin:16px 0}
 .password-confirm-panel>strong{font-size:13px;color:#173e32}
 .password-confirm-panel label{margin-top:3px}
+
+/* Store logo upload and header image */
+.brand-logo-image{width:42px;height:42px;flex:0 0 42px;object-fit:contain;border-radius:10px;background:#fff;padding:3px}
+.settings-logo-field{display:grid;gap:10px;padding:14px;border:1px solid #e9e4d7;border-radius:12px;background:#fbfaf5}
+.settings-logo-field input[type=file]{height:auto;min-height:44px;padding:8px;background:#fff}
+.store-logo-preview{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.store-logo-preview img{width:76px;height:76px;object-fit:contain;background:#fff;border:1px solid #e9e4d7;border-radius:12px;padding:6px}
+.store-logo-preview button{min-height:38px;border:1px solid #ddd8c9;background:#f8f6ef;color:#244738;border-radius:8px;padding:8px 12px;font:700 11px 'DM Sans';cursor:pointer}
