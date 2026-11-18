@@ -52,9 +52,7 @@ button:disabled{opacity:.6;cursor:wait}
 
 
 /* v1.2.4 — mobile catalog and floating cart */
-.food-art{position:relative}
-.food-art img{width:100%;height:100%;object-fit:contain;display:block}
-.food-art-fallback{display:none;position:absolute;inset:0;place-items:center;font-size:48px}
+.food-art img{width:100%;height:100%;object-fit:contain;object-position:center;padding:6px;display:block}
 .mobile-cart-dock,.mobile-cart-layer{display:none}
 @media(max-width:760px){
   .main{padding-bottom:calc(112px + env(safe-area-inset-bottom))}
@@ -100,3 +98,14 @@ button:disabled{opacity:.6;cursor:wait}
   .mobile-cart-total{font-size:11px}
 }
 @keyframes cart-sheet-in{from{transform:translateY(18px);opacity:.7}to{transform:translateY(0);opacity:1}}
+
+
+/* v1.2.6 — short notices, safe image fallback, and settings re-auth UI */
+.notice-toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);width:min( min(92vw, 620px), calc(100vw - 24px));z-index:1000;box-shadow:0 8px 28px #102d2430;animation:notice-in .18s ease-out}
+@keyframes notice-in{from{opacity:0;transform:translate(-50%,-8px)}to{opacity:1;transform:translate(-50%,0)}}
+.food-art{position:relative;overflow:hidden}
+.food-art img{object-fit:contain;object-position:center;max-width:100%;max-height:100%}
+.food-art-fallback{display:none;place-items:center;width:100%;height:100%;font-size:42px;color:#806f4c}
+.password-confirm-panel{display:grid;gap:10px;padding:15px;border:1px solid #e4d8b9;background:#f8f4e8;border-radius:12px;margin:16px 0}
+.password-confirm-panel>strong{font-size:13px;color:#173e32}
+.password-confirm-panel label{margin-top:3px}
