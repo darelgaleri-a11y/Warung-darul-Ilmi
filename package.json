@@ -3,7 +3,20 @@
   "private": true,
   "version": "1.2.1",
   "type": "module",
-  "scripts": {"dev":"vite", "build":"vite build", "preview":"vite preview"},
-  "dependencies": {"@supabase/supabase-js":"^2.57.0", "@vitejs/plugin-react":"latest", "vite":"latest", "react":"latest", "react-dom":"latest", "xlsx":"^0.18.5"},
-  "devDependencies": {}
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "supabase": "^3.2.0"
+  }
 }
