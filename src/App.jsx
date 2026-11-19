@@ -46,6 +46,8 @@ function App() {
   const [filter, setFilter] = useState('Semua');
   const [search, setSearch] = useState('');
   const [loadingOrders, setLoadingOrders] = useState(false);
+  const [orderSubmitting, setOrderSubmitting] = useState(false);
+  const [whatsAppFallbackUrl, setWhatsAppFallbackUrl] = useState('');
   const [storeSettings, setStoreSettings] = useState({ store_name: 'Warung Darul Ilmi', brand_logo_url: '', whatsapp_number: '', whatsapp_number_putra: '', whatsapp_number_putri: '', bank_name: '', bank_account_number: '', bank_account_name: '' });
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsPassword, setSettingsPassword] = useState('');
@@ -273,32 +275,116 @@ function App() {
   function changeQty(id,delta) { setCart(c=>c.map(x=>x.id===id?{...x,qty:x.qty+delta}:x).filter(x=>x.qty>0)); }
 
   async function placeOrder() {
+    if (orderSubmitting) return;
     if (!supabase || databaseStatus !== 'connected') { setNotice('Database belum tersambung. Pesanan belum dikirim. Periksa konfigurasi Supabase.'); return; }
     if (!identity.name.trim() || !identity.dorm || !identity.className) { setNotice('Lengkapi nama, asrama, dan kelas.'); return; }
     if (!cart.length) { setNotice('Keranjang masih kosong.'); return; }
-    const payload = cart.map(x=>({product_id:Number(x.id),quantity:x.qty}));
-    // The database requires a 256-bit random guest access token (64 hex characters).
-    if (!globalThis.crypto?.getRandomValues) { setNotice('Browser tidak mendukung pembuatan token pesanan yang aman. Gunakan browser terbaru melalui HTTPS.'); return; }
-    const tokenBytes = new Uint8Array(32);
-    globalThis.crypto.getRandomValues(tokenBytes);
-    const accessToken = Array.from(tokenBytes, byte => byte.toString(16).padStart(2, '0')).join('');
-    const {data,error} = await supabase.rpc('create_guest_order',{
-      p_guest_name:identity.name.trim(),p_guest_gender:identity.gender,p_guest_dormitory:identity.dorm,p_guest_class:identity.className,
-      p_guest_phone:identity.phone.trim() || null,p_customer_note:identity.note.trim() || null,p_items:payload,p_access_token:accessToken
-    });
-    if (error) { setNotice(`Pesanan gagal disimpan: ${error.message}. Pastikan migrasi Guest Checkout v2 sudah dijalankan.`); return; }
-    const result = Array.isArray(data) ? data[0] : data;
 
-    const items = cart.map(x=>({...x}));
-    const message = ['*PESANAN WARUNG DARUL ILMI*',`Nomor: ${result.order_number}`,`Nama: ${identity.name}`,`Kategori: ${identity.gender}`,`Asrama: ${identity.dorm}`,`Kelas: ${identity.className}`,`Tanggal pengiriman: ${new Date(`${result.delivery_date}T00:00:00`).toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}`,'', '*Rincian pesanan:*',...items.map(x=>`- ${x.name} x${x.qty} = ${money(x.price*x.qty)}`),`*Total: ${money(result.total_amount)}*`,storeSettings.bank_name?`Bank: ${storeSettings.bank_name}`:'',storeSettings.bank_account_number?`Rekening: ${storeSettings.bank_account_number}`:'',storeSettings.bank_account_name?`Atas nama: ${storeSettings.bank_account_name}`:'',identity.note?`Catatan: ${identity.note}`:'',storeSettings.payment_instructions||'Mohon konfirmasi pembayaran. Barang diserahkan setelah pembayaran diverifikasi.','Silakan kirim bukti transfer berupa foto/screenshot langsung di chat WhatsApp ini. Bukti transfer tidak diunggah ke aplikasi.'].filter(Boolean).join('\n');
-    setCart([]); setCartOpen(false); setIdentity({name:'',gender:identity.gender,dorm:'',className:'',phone:'',note:''});
-    setNotice(`Pesanan ${result.order_number} berhasil tersimpan. Tanggal pengiriman: ${result.delivery_date}.`);
-    const selectedWhatsApp = identity.gender === 'Putri' ? (storeSettings.whatsapp_number_putri || storeSettings.whatsapp_number) : (storeSettings.whatsapp_number_putra || storeSettings.whatsapp_number);
-    const wa=(selectedWhatsApp||'').replace(/\D/g,'');
-    if (wa) window.open(`https://wa.me/${wa}?text=${encodeURIComponent(message)}`,'_blank','noopener,noreferrer');
-    else setNotice(`Pesanan ${result.order_number} tersimpan online. Admin belum mengisi nomor WhatsApp pada Pengaturan.`);
+    const selectedWhatsApp = identity.gender === 'Putri'
+      ? (storeSettings.whatsapp_number_putri || storeSettings.whatsapp_number)
+      : (storeSettings.whatsapp_number_putra || storeSettings.whatsapp_number);
+    const wa = (selectedWhatsApp || '').replace(/\D/g, '');
+
+    // Reserve a browser tab during the original click, before awaiting the database.
+    // A visible fallback action is also rendered after success if the browser blocks it.
+    let whatsappTab = null;
+    if (wa) {
+      try {
+        whatsappTab = window.open('about:blank', '_blank');
+        if (whatsappTab) {
+          whatsappTab.opener = null;
+          whatsappTab.document.title = 'Menyiapkan WhatsApp';
+          whatsappTab.document.body.textContent = 'Pesanan sedang disimpan. WhatsApp akan dibuka setelah penyimpanan selesai.';
+        }
+      } catch (popupError) {
+        whatsappTab = null;
+      }
+    }
+
+    setOrderSubmitting(true);
+    setWhatsAppFallbackUrl('');
+    try {
+      const payload = cart.map(x => ({ product_id: Number(x.id), quantity: x.qty }));
+      // The database requires a 256-bit random guest access token (64 hex characters).
+      if (!globalThis.crypto?.getRandomValues) {
+        if (whatsappTab && !whatsappTab.closed) whatsappTab.close();
+        setNotice('Browser tidak mendukung pembuatan token pesanan yang aman. Gunakan browser terbaru melalui HTTPS.');
+        return;
+      }
+      const tokenBytes = new Uint8Array(32);
+      globalThis.crypto.getRandomValues(tokenBytes);
+      const accessToken = Array.from(tokenBytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      const { data, error } = await supabase.rpc('create_guest_order', {
+        p_guest_name: identity.name.trim(), p_guest_gender: identity.gender, p_guest_dormitory: identity.dorm, p_guest_class: identity.className,
+        p_guest_phone: identity.phone.trim() || null, p_customer_note: identity.note.trim() || null, p_items: payload, p_access_token: accessToken
+      });
+      if (error) {
+        if (whatsappTab && !whatsappTab.closed) whatsappTab.close();
+        setNotice(`Pesanan gagal disimpan: ${error.message}. Keranjang tetap disimpan; bila terjadi gangguan koneksi, periksa antrean kasir sebelum mencoba lagi.`);
+        return;
+      }
+
+      const result = Array.isArray(data) ? data[0] : data;
+      const validResult = result && result.order_id && result.order_number && result.delivery_date && Number.isFinite(Number(result.total_amount));
+      if (!validResult) {
+        if (whatsappTab && !whatsappTab.closed) whatsappTab.close();
+        setNotice('Server tidak mengembalikan detail nomor pesanan yang lengkap. Pesanan mungkin sudah tersimpan. Jangan langsung mengirim ulang; periksa antrean kasir atau hubungi admin terlebih dahulu.');
+        return;
+      }
+
+      const items = cart.map(x => ({ ...x }));
+      const message = [
+        `*${storeSettings.store_name || 'WARUNG DARUL ILMI'}*`,
+        `Nomor: ${result.order_number}`,
+        `Nama: ${identity.name}`,
+        `Kategori: ${identity.gender}`,
+        `Asrama: ${identity.dorm}`,
+        `Kelas: ${identity.className}`,
+        `Tanggal pengiriman: ${new Date(`${result.delivery_date}T00:00:00`).toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`,
+        '',
+        '*Rincian pesanan:*',
+        ...items.map(x => `- ${x.name} x${x.qty} = ${money(x.price * x.qty)}`),
+        `*Total: ${money(result.total_amount)}*`,
+        storeSettings.bank_name ? `Bank: ${storeSettings.bank_name}` : '',
+        storeSettings.bank_account_number ? `Rekening: ${storeSettings.bank_account_number}` : '',
+        storeSettings.bank_account_name ? `Atas nama: ${storeSettings.bank_account_name}` : '',
+        identity.note ? `Catatan: ${identity.note}` : '',
+        storeSettings.payment_instructions || 'Mohon konfirmasi pembayaran. Barang diserahkan setelah pembayaran diverifikasi.',
+        'Silakan kirim bukti transfer berupa foto/screenshot langsung di chat WhatsApp ini. Bukti transfer tidak diunggah ke aplikasi.'
+      ].filter(Boolean).join('\n');
+
+      const whatsappUrl = wa ? `https://wa.me/${wa}?text=${encodeURIComponent(message)}` : '';
+      if (whatsappUrl) {
+        setWhatsAppFallbackUrl(whatsappUrl);
+        if (whatsappTab && !whatsappTab.closed) {
+          try {
+            whatsappTab.location.replace(whatsappUrl);
+          } catch (navigationError) {
+            try { whatsappTab.close(); } catch (closeError) { /* no-op */ }
+          }
+        }
+      } else if (whatsappTab && !whatsappTab.closed) {
+        whatsappTab.close();
+      }
+
+      // Clear the cart only after the RPC returned a valid order receipt.
+      setCart([]);
+      setCartOpen(false);
+      setIdentity({ name: '', gender: identity.gender, dorm: '', className: '', phone: '', note: '' });
+      if (whatsappUrl) {
+        setNotice(`Pesanan ${result.order_number} tersimpan. Tekan tombol Kirim di WhatsApp untuk mengirim konfirmasi. Jika WhatsApp tidak terbuka, gunakan tombol WhatsApp pada halaman ini.`);
+      } else {
+        setNotice(`Pesanan ${result.order_number} tersimpan online. Admin belum mengisi nomor WhatsApp pada Pengaturan. Hubungi admin dan jangan mengirim ulang pesanan.`);
+      }
+    } catch (error) {
+      if (whatsappTab && !whatsappTab.closed) {
+        try { whatsappTab.close(); } catch (closeError) { /* no-op */ }
+      }
+      setNotice(`Terjadi gangguan saat memproses pesanan: ${error?.message || 'Kesalahan jaringan.'}. Status penyimpanan mungkin belum dapat dipastikan. Periksa antrean kasir sebelum mencoba lagi agar tidak membuat pesanan ganda.`);
+    } finally {
+      setOrderSubmitting(false);
+    }
   }
-
   async function updateOrder(id,patch) {
     if (!supabase) return;
     const target = orders.find(o => o.id === id);
@@ -490,7 +576,7 @@ function App() {
     </header>
     <main className="main">
       {databaseStatus!=='connected'&&<div className={`notice db-status db-${databaseStatus}`} role="status">{databaseStatus==='checking'?'Memeriksa koneksi Supabase…':databaseStatus==='missing-config'?'Supabase belum dikonfigurasi. Isi .env.local terlebih dahulu.':'Koneksi database bermasalah. Periksa URL, publishable key, dan tabel.'}</div>}
-      {session&&authLoading&&<div className="notice">Memuat akses petugas…</div>}{session&&!authLoading&&!profile&&<div className="notice">Profil petugas tidak ditemukan atau belum memiliki akses.</div>}{notice&&<div className="notice notice-toast" role="status"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Tutup pemberitahuan">×</button></div>}
+      {session&&authLoading&&<div className="notice">Memuat akses petugas…</div>}{session&&!authLoading&&!profile&&<div className="notice">Profil petugas tidak ditemukan atau belum memiliki akses.</div>}{notice&&<div className="notice notice-toast" role="status"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Tutup pemberitahuan">×</button></div>}{whatsAppFallbackUrl&&<div className="panel" role="status"><strong>Pesanan sudah tersimpan.</strong><p className="fine-print">Jika tab WhatsApp tidak terbuka otomatis, tekan tombol berikut. WhatsApp akan menampilkan pesan yang sudah disiapkan; Anda tetap perlu menekan Kirim di WhatsApp.</p><button className="primary full" type="button" onClick={()=>window.open(whatsAppFallbackUrl,'_blank','noopener,noreferrer')}>Buka WhatsApp untuk mengirim pesanan</button><button type="button" onClick={()=>setWhatsAppFallbackUrl('')}>Tutup pemberitahuan WhatsApp</button></div>}
       {page==='order'&&<section>
         <div className="hero"><div className="hero-pattern">✦</div><p className="eyebrow">SELAMAT DATANG</p><h1>Pesan kebutuhanmu<br/><em>dengan mudah.</em></h1><p className="hero-copy">Pilih menu, periksa pesanan, lalu konfirmasi melalui WhatsApp.</p><div className="hero-meta"><span>✧ Praktis</span><span>✧ Tertata</span><span>✧ Mudah dikonfirmasi</span></div></div>
         <div className="section-heading"><div><p className="eyebrow">LANGKAH 01</p><h2>Identitas santri</h2><p className="muted">Data ini membantu petugas mengantarkan pesanan ke tempat yang tepat.</p></div></div>
@@ -501,9 +587,9 @@ function App() {
         {menuLoading&&<div className="panel">Memuat katalog…</div>}
         <div className="menu-grid">{visibleMenu.map(item=><article className="menu-card" key={item.id}><div className="food-art">{item.image?<><img src={item.image} alt="" loading="lazy" onError={e=>{e.currentTarget.style.display='none';const fallback=e.currentTarget.nextElementSibling;if(fallback)fallback.style.display='grid';}}/><span className="food-art-fallback" aria-hidden="true">{item.emoji||'🍽️'}</span></>:item.emoji}</div><div className="menu-info"><span className="category-label">{item.category}</span><h3>{item.name}</h3><p>{item.description}</p><div className="menu-bottom"><strong>{money(item.price)}</strong><button onClick={()=>addToCart(item)}>+ Tambah</button></div></div></article>)}</div>
         <div className="section-heading desktop-cart-heading"><div><p className="eyebrow">LANGKAH 03</p><h2>Keranjang pesanan</h2></div></div>
-        <div className="panel cart-panel desktop-cart-panel">{cart.length===0?<p className="empty">Keranjang masih kosong. Tambahkan menu pilihanmu.</p>:<>{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>−</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}<label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder}>Simpan pesanan & lanjut WhatsApp <span>→</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></>}</div>
+        <div className="panel cart-panel desktop-cart-panel">{cart.length===0?<p className="empty">Keranjang masih kosong. Tambahkan menu pilihanmu.</p>:<>{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>−</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}<label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting?'Menyimpan pesanan…':'Simpan pesanan & lanjut WhatsApp'} <span>→</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></>}</div>
         {cartCount>0&&<div className="mobile-cart-dock"><button type="button" className="mobile-cart-summary" onClick={()=>setCartOpen(true)} aria-expanded={cartOpen} aria-controls="mobile-cart-sheet"><span className="mobile-cart-icon">🛒 <b>{cartCount}</b></span><span className="mobile-cart-label"><strong>Lihat keranjang</strong><small>{cartCount} item dipilih</small></span><strong className="mobile-cart-total">{money(cartTotal)}</strong><span className="mobile-cart-chevron">↑</span></button></div>}
-        {cartOpen&&cartCount>0&&<div className="mobile-cart-layer" onClick={()=>setCartOpen(false)}><section id="mobile-cart-sheet" className="mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-cart-title" onClick={e=>e.stopPropagation()}><div className="mobile-cart-sheet-head"><div><p className="eyebrow">LANGKAH 03</p><h2 id="mobile-cart-title">Keranjang pesanan</h2></div><button type="button" className="mobile-cart-close" onClick={()=>setCartOpen(false)} aria-label="Tutup keranjang">×</button></div><div className="mobile-cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>−</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}</div><label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder}>Simpan pesanan & lanjut WhatsApp <span>→</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></section></div>}
+        {cartOpen&&cartCount>0&&<div className="mobile-cart-layer" onClick={()=>setCartOpen(false)}><section id="mobile-cart-sheet" className="mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-cart-title" onClick={e=>e.stopPropagation()}><div className="mobile-cart-sheet-head"><div><p className="eyebrow">LANGKAH 03</p><h2 id="mobile-cart-title">Keranjang pesanan</h2></div><button type="button" className="mobile-cart-close" onClick={()=>setCartOpen(false)} aria-label="Tutup keranjang">×</button></div><div className="mobile-cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>−</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}</div><label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting?'Menyimpan pesanan…':'Simpan pesanan & lanjut WhatsApp'} <span>→</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></section></div>}
       </section>}
       {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu konfirmasi</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Sedang diproses</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama…"/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesanan…</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/></section>}
       {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Hanya pesanan berstatus siap diserahkan yang dapat ditandai sudah diserahkan.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button className="primary" onClick={()=>printKitchenTickets()}>Cetak semua tiket dapur</button><button onClick={loadOrders}>Muat ulang pesanan</button></div></div><div className="stats"><div className="stat-card"><small>Jumlah pesanan</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender} · {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className} · {o.items.reduce((n,i)=>n+i.qty,0)} item · {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>× {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span><button onClick={()=>printKitchenTickets([o])}>Cetak tiket</button><button className="primary" onClick={()=>updateOrder(o.id,{status:'delivered'})} disabled={o.status!=='ready'}>Tandai diserahkan</button></div></article>)}</div>)}</section>}
