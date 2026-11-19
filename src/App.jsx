@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { isSupabaseConfigured, supabase } from './lib/supabase.js';
 import * as XLSX from 'xlsx';
 
@@ -43,7 +43,16 @@ function App() {
   const [staffLoginOpen, setStaffLoginOpen] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState(isSupabaseConfigured ? 'checking' : 'missing-config');
   const [orders, setOrders] = useState([]);
-  const [filter, setFilter] = useState('Semua');
+  const [ordersRealtimeVersion, setOrdersRealtimeVersion] = useState(0);
+  const [ordersHasMore, setOrdersHasMore] = useState(false);
+  const [ordersLoadingMore, setOrdersLoadingMore] = useState(false);
+  const [reportOrders, setReportOrders] = useState([]);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportLoaded, setReportLoaded] = useState(false);
+  const [reportLimitReached, setReportLimitReached] = useState(false);
+  const [distributionRows, setDistributionRows] = useState([]);
+  const [distributionLoading, setDistributionLoading] = useState(false);
+  const [distributionLimitReached, setDistributionLimitReached] = useState(false);  const [filter, setFilter] = useState('Semua');
   const [search, setSearch] = useState('');
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
@@ -63,8 +72,7 @@ function App() {
   const [overrideNote, setOverrideNote] = useState('');
   const [overrideBusy, setOverrideBusy] = useState(false);
   const [distributionDate, setDistributionDate] = useState('');
-  const [distributionGender, setDistributionGender] = useState('Semua');
-  const [adminProducts, setAdminProducts] = useState([]);
+  const [distributionGender, setDistributionGender] = useState('Semua');  const [adminProducts, setAdminProducts] = useState([]);
   const [adminCategories, setAdminCategories] = useState([]);
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [productForm, setProductForm] = useState({id:null,name:'',description:'',price:'',category_id:'',image_url:'',sku:'',is_available:true});
@@ -76,6 +84,10 @@ function App() {
   const [reportTo, setReportTo] = useState('');
   const [reportGender, setReportGender] = useState('Semua');
   const [cashierGenderFilter, setCashierGenderFilter] = useState('Semua');
+  const ordersLoadInFlightRef = useRef(false);
+  const ordersRefreshQueuedRef = useRef(false);
+  const distributionLoadVersionRef = useRef(0);
+  const reportLoadInFlightRef = useRef(false);
   const isStaff = ['cashier','super_admin'].includes(profile?.role);
   const isAdmin = profile?.role === 'super_admin';
 
@@ -109,32 +121,70 @@ function App() {
   useEffect(() => {
     let alive = true;
     if (!supabase) { setDatabaseStatus('missing-config'); setMenuLoading(false); return undefined; }
-    setDatabaseStatus('checking'); setMenuLoading(true);
+    setDatabaseStatus('checking');
+    setMenuLoading(true);
+
     const run = async (label, request, onSuccess) => {
       try {
         const result = await request;
         if (!alive) return false;
-        if (result?.error) { console.warn(`Gagal memuat ${label}:`,result.error); return false; }
-        onSuccess(result); return true;
-      } catch (error) { if (alive) console.warn(`Gagal memuat ${label}:`,error); return false; }
+        if (result?.error) {
+          console.warn(`Gagal memuat ${label}:`, result.error);
+          return false;
+        }
+        return onSuccess(result) !== false;
+      } catch (error) {
+        if (alive) console.warn(`Gagal memuat ${label}:`, error);
+        return false;
+      }
     };
+
     const tasks = [
-      run('pengaturan toko',supabase.from('store_settings').select('*').eq('id',true).maybeSingle(),({data}) => { if (data) setStoreSettings(current => ({...current,...data})); }),
-      run('kategori',supabase.from('categories').select('id,name,sort_order').eq('is_active',true).order('sort_order'),({data}) => { if (data?.length) setCategories(['Semua',...data.map(c => c.name)]); }),
-      run('produk',supabase.from('products').select('id,name,description,price,image_url,category_id,categories(name)').eq('is_available',true).order('name'),({data}) => { if (data) setProducts(data.map(p => ({id:p.id,name:p.name,description:p.description || '',price:Number(p.price),image:p.image_url,category:p.categories?.name || 'Lainnya',emoji:String.fromCodePoint(0x1F37D)}))); }),
-      run('jadwal mingguan',supabase.from('delivery_weekdays').select('weekday,is_active').order('weekday'),({data}) => { if (data) setDeliveryWeekdays(data); }),
-      run('tanggal pengiriman berikutnya',supabase.rpc('next_delivery_date'),({data}) => { if (data) setNextDeliveryDate(data); })
+      run('pengaturan toko', supabase.from('store_settings').select('*').eq('id', true).maybeSingle(), ({ data }) => {
+        if (!data || typeof data !== 'object') return false;
+        setStoreSettings(current => ({ ...current, ...data }));
+        return true;
+      }),
+      run('kategori', supabase.from('categories').select('id,name,sort_order').eq('is_active', true).order('sort_order'), ({ data }) => {
+        if (!Array.isArray(data)) return false;
+        setCategories(['Semua', ...data.map(c => c.name)]);
+        return true;
+      }),
+      run('produk', supabase.from('products').select('id,name,description,price,image_url,category_id,categories(name)').eq('is_available', true).order('name'), ({ data }) => {
+        if (!Array.isArray(data)) return false;
+        setProducts(data.map(p => ({ id: p.id, name: p.name, description: p.description || '', price: Number(p.price), image: p.image_url, category: p.categories?.name || 'Lainnya', emoji: String.fromCodePoint(0x1F37D) })));
+        return true;
+      }),
+      run('jadwal mingguan', supabase.from('delivery_weekdays').select('weekday,is_active').order('weekday'), ({ data }) => {
+        if (!Array.isArray(data)) return false;
+        setDeliveryWeekdays(data);
+        return true;
+      }),
+      run('tanggal pengiriman berikutnya', supabase.rpc('next_delivery_date'), ({ data }) => {
+        const validDate = typeof data === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data)
+          && !Number.isNaN(Date.parse(`${data}T00:00:00Z`))
+          && new Date(`${data}T00:00:00Z`).toISOString().slice(0, 10) === data;
+        if (!validDate) return false;
+        setNextDeliveryDate(data);
+        return true;
+      })
     ];
+
     Promise.all(tasks).then(results => {
       if (!alive) return;
-      const successes = results.filter(Boolean).length;
-      setDatabaseStatus(successes > 0 ? 'connected' : 'error');
-      if (successes > 0 && successes < tasks.length) setNotice('Sebagian data online gagal dimuat. Data yang tersedia tetap dapat digunakan.');
-      if (successes === tasks.length) setNotice('Terhubung ke Supabase Ã‚Â· Katalog dan checkout menggunakan database online.');
-    }).finally(() => { if (alive) setMenuLoading(false); });
+      const allRequiredDataReady = results.every(Boolean);
+      setDatabaseStatus(allRequiredDataReady ? 'connected' : 'error');
+      if (allRequiredDataReady) {
+        setNotice('Terhubung ke Supabase. Produk, pengaturan toko, dan jadwal pengiriman siap digunakan.');
+      } else {
+        setNotice('Database belum siap untuk checkout. Sebagian data wajib gagal dimuat atau jadwal pengiriman berikutnya belum tersedia. Periksa tabel, jadwal, dan koneksi Supabase.');
+      }
+    }).finally(() => {
+      if (alive) setMenuLoading(false);
+    });
+
     return () => { alive = false; };
   }, []);
-
   useEffect(() => {
     let alive = true;
     async function loadProfile() {
@@ -156,18 +206,139 @@ function App() {
     };
   }, [session?.user?.id]);
 
-  async function loadAdminCatalog() {
+  async function loadAdminCatalog({manageBusy = true} = {}) {
+    if (!supabase || !isAdmin) return false;
+    if (manageBusy) setCatalogBusy(true);
+    try {
+      const [{ data: cats, error: catError }, { data: prods, error: prodError }] = await Promise.all([
+        supabase.from('categories').select('id,name,sort_order,is_active').order('sort_order').order('name'),
+        supabase.from('products').select('id,name,description,sku,price,image_url,category_id,is_available,categories(name)').order('name')
+      ]);
+      if (catError) throw catError;
+      if (prodError) throw prodError;
+      if (!Array.isArray(cats) || !Array.isArray(prods)) throw new Error('Server tidak mengembalikan daftar kategori dan produk yang valid.');
+      setAdminCategories(cats);
+      setAdminProducts(prods);
+      return true;
+    } catch (error) {
+      setNotice(`Gagal memuat katalog admin: ${error?.message || 'Kesalahan jaringan.'}`);
+      return false;
+    } finally {
+      if (manageBusy) setCatalogBusy(false);
+    }
+  }
+  function resetProductForm() {
+    setProductForm({id:null,name:'',description:'',price:'',category_id:adminCategories.find(c=>c.is_active)?.id || '',image_url:'',sku:'',is_available:true});
+    setEditingProduct(false);
+  }
+  function editProduct(product) {
+    setProductForm({id:product.id,name:product.name,description:product.description||'',price:String(product.price),category_id:product.category_id||'',image_url:product.image_url||'',sku:product.sku||'',is_available:product.is_available});
+    setEditingProduct(true);
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  async function saveProduct(e) {
+    e.preventDefault();
+    if (!supabase || !isAdmin) return;
+    const price = Number(productForm.price);
+    if (!productForm.name.trim() || !Number.isSafeInteger(price) || price < 0) {
+      setNotice('Nama produk wajib diisi dan harga harus berupa angka bulat minimal 0.');
+      return;
+    }
+    setCatalogBusy(true);
+    let writeConfirmed = false;
+    try {
+      const payload = {name:productForm.name.trim(),description:productForm.description.trim()||null,price,category_id:productForm.category_id?Number(productForm.category_id):null,image_url:productForm.image_url.trim()||null,sku:productForm.sku.trim()||null,is_available:productForm.is_available,updated_at:new Date().toISOString()};
+      const query = productForm.id
+        ? supabase.from('products').update(payload).eq('id',productForm.id)
+        : supabase.from('products').insert(payload);
+      const {data,error} = await query.select('id').maybeSingle();
+      if (error) throw error;
+      if (!data?.id) throw new Error('Database tidak mengonfirmasi baris produk yang disimpan.');
+      writeConfirmed = true;
+      resetProductForm();
+      const adminRefreshOk = await loadAdminCatalog({manageBusy:false});
+      let customerRefreshOk = true;
+      try { await refreshCustomerCatalog(); } catch (refreshError) { customerRefreshOk = false; throw refreshError; }
+      if (!adminRefreshOk || !customerRefreshOk) setNotice('Produk tersimpan, tetapi daftar katalog belum berhasil dimuat ulang. Tekan Muat ulang untuk memperbarui tampilan.');
+      else setNotice(productForm.id?'Produk berhasil diperbarui dan diverifikasi.':'Produk berhasil ditambahkan dan diverifikasi.');
+    } catch (error) {
+      setNotice(writeConfirmed ? `Produk tersimpan, tetapi tampilan katalog gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}. Tekan Muat ulang.` : `Produk gagal dipastikan tersimpan: ${error?.message || 'Kesalahan jaringan.'}. Data formulir tetap dipertahankan.`);
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+  async function refreshCustomerCatalog() {
+    if (!supabase) throw new Error('Supabase belum dikonfigurasi.');
+    const [{data: cats, error: catError}, {data: prods, error: prodError}] = await Promise.all([
+      supabase.from('categories').select('id,name,sort_order').eq('is_active',true).order('sort_order'),
+      supabase.from('products').select('id,name,description,price,image_url,category_id,categories(name)').eq('is_available',true).order('name')
+    ]);
+    if (catError) throw catError;
+    if (prodError) throw prodError;
+    if (!Array.isArray(cats) || !Array.isArray(prods)) throw new Error('Data katalog pelanggan tidak valid.');
+    setCategories(['Semua',...cats.map(c=>c.name)]);
+    setProducts(prods.map(p=>({id:p.id,name:p.name,description:p.description||'',price:Number(p.price),image:p.image_url,category:p.categories?.name||'Lainnya',emoji:'ðŸ½ï¸'})));
+  }
+  async function addCategory(e) {
+    e.preventDefault();
+    if (!supabase || !isAdmin) return;
+    const name = categoryName.trim();
+    if (!name) return;
+    setCatalogBusy(true);
+    let writeConfirmed = false;
+    try {
+      const {data,error} = await supabase.from('categories').insert({name,sort_order:adminCategories.length,is_active:true}).select('id').maybeSingle();
+      if (error) throw error;
+      if (!data?.id) throw new Error('Database tidak mengonfirmasi kategori yang ditambahkan.');
+      writeConfirmed = true;
+      setCategoryName('');
+      const adminRefreshOk = await loadAdminCatalog({manageBusy:false});
+      try { await refreshCustomerCatalog(); } catch (refreshError) { setNotice(`Kategori tersimpan, tetapi katalog pelanggan gagal dimuat ulang: ${refreshError?.message || 'Kesalahan jaringan.'}.`); return; }
+      setNotice(adminRefreshOk ? 'Kategori berhasil ditambahkan dan diverifikasi.' : 'Kategori tersimpan, tetapi daftar admin belum berhasil dimuat ulang. Tekan Muat ulang.');
+    } catch (error) {
+      setNotice(writeConfirmed ? `Kategori tersimpan, tetapi tampilan gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}. Tekan Muat ulang.` : `Kategori gagal disimpan: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+  async function toggleCategory(cat) {
     if (!supabase || !isAdmin) return;
     setCatalogBusy(true);
-    const [{data: cats, error: catError}, {data: prods, error: prodError}] = await Promise.all([
-      supabase.from('categories').select('id,name,sort_order,is_active').order('sort_order').order('name'),
-      supabase.from('products').select('id,name,description,sku,price,image_url,category_id,is_available,categories(name)').order('name')
-    ]);
-    if (catError || prodError) setNotice(`Gagal memuat katalog admin: ${(catError || prodError).message}`);
-    else { setAdminCategories(cats || []); setAdminProducts(prods || []); }
-    setCatalogBusy(false);
+    let writeConfirmed = false;
+    try {
+      const nextValue = !cat.is_active;
+      const {data,error} = await supabase.from('categories').update({is_active:nextValue}).eq('id',cat.id).select('id,is_active').maybeSingle();
+      if (error) throw error;
+      if (!data || data.id !== cat.id || data.is_active !== nextValue) throw new Error('Perubahan kategori tidak ditemukan pada hasil verifikasi database.');
+      writeConfirmed = true;
+      const adminRefreshOk = await loadAdminCatalog({manageBusy:false});
+      try { await refreshCustomerCatalog(); } catch (refreshError) { setNotice(`Kategori sudah tersimpan, tetapi katalog pelanggan gagal dimuat ulang: ${refreshError?.message || 'Kesalahan jaringan.'}.`); return; }
+      setNotice(adminRefreshOk ? `Kategori ${nextValue?'diaktifkan':'dinonaktifkan'} dan telah diverifikasi.` : 'Kategori tersimpan, tetapi daftar admin belum berhasil dimuat ulang. Tekan Muat ulang.');
+    } catch (error) {
+      setNotice(writeConfirmed ? `Kategori tersimpan, tetapi tampilan gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}.` : `Kategori gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setCatalogBusy(false);
+    }
   }
-  useEffect(() => { if (isAdmin && page === 'catalog') loadAdminCatalog(); }, [isAdmin, page]);
+  async function toggleProductAvailability(product) {
+    if (!supabase || !isAdmin) return;
+    setCatalogBusy(true);
+    let writeConfirmed = false;
+    try {
+      const nextValue = !product.is_available;
+      const {data,error} = await supabase.from('products').update({is_available:nextValue,updated_at:new Date().toISOString()}).eq('id',product.id).select('id,is_available').maybeSingle();
+      if (error) throw error;
+      if (!data || data.id !== product.id || data.is_available !== nextValue) throw new Error('Perubahan ketersediaan produk tidak terkonfirmasi dari database.');
+      writeConfirmed = true;
+      const adminRefreshOk = await loadAdminCatalog({manageBusy:false});
+      try { await refreshCustomerCatalog(); } catch (refreshError) { setNotice(`Status produk sudah tersimpan, tetapi katalog pelanggan gagal dimuat ulang: ${refreshError?.message || 'Kesalahan jaringan.'}.`); return; }
+      setNotice(adminRefreshOk ? `Produk berhasil ${nextValue?'ditampilkan':'disembunyikan'} dan telah diverifikasi.` : 'Produk tersimpan, tetapi daftar admin belum berhasil dimuat ulang. Tekan Muat ulang.');
+    } catch (error) {
+      setNotice(writeConfirmed ? `Perubahan produk tersimpan, tetapi tampilan gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}.` : `Status produk gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setCatalogBusy(false);
+    }
+  }  useEffect(() => { if (isAdmin && page === 'catalog') loadAdminCatalog(); }, [isAdmin, page]);
 
   function resetProductForm() {
     setProductForm({id:null,name:'',description:'',price:'',category_id:adminCategories.find(c=>c.is_active)?.id || '',image_url:'',sku:'',is_available:true});
@@ -214,60 +385,72 @@ function App() {
     if(error) setNotice(`Status produk gagal diperbarui: ${error.message}`); else {setNotice(`Produk ${product.is_available?'disembunyikan':'ditampilkan'} dari katalog pelanggan.`);await loadAdminCatalog();await refreshCustomerCatalog();}
   }
 
-  async function loadOrders() {
+  async function loadOrders({append = false} = {}) {
     if (!supabase || !profile || !['cashier','super_admin'].includes(profile.role)) return;
-    setLoadingOrders(true);
+    if (ordersLoadInFlightRef.current) return;
     if (profile.role === 'cashier' && !normalizeGender(profile.cashier_gender)) {
       setOrders([]);
+      setOrdersHasMore(false);
       setNotice('Akun kasir belum diberi jalur Putra atau Putri. Minta Super Admin mengatur cashier_gender pada profil akun ini.');
-      setLoadingOrders(false);
       return;
     }
-    // Pagination Supabase: ambil berurutan per 500 baris sampai halaman terakhir.
-    // Bila pemuatan gagal di tengah jalan, data lama tetap dipertahankan agar tidak
-    // menampilkan antrean parsial seolah-olah seluruh data sudah berhasil dimuat.
-    const PAGE_SIZE = 500;
-    const MAX_ROWS = 100000;
-    let allRows = [];
-    let fetchError = null;
-    let reachedLimit = false;
+
+    const PAGE_SIZE = 100;
+    const from = append ? orders.length : 0;
+    ordersLoadInFlightRef.current = true;
+    if (append) setOrdersLoadingMore(true); else setLoadingOrders(true);
     try {
-      for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
-        let query = supabase.from('orders')
-          .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
-          .order('created_at',{ascending:false})
-          .order('id',{ascending:false})
-          .range(from, from + PAGE_SIZE - 1);
-        // Defense in depth: RLS tetap berlaku, ditambah batas jalur untuk kasir.
-        if (profile.role === 'cashier') query = query.eq('guest_gender', normalizeGender(profile.cashier_gender));
-        const {data,error} = await query;
-        if (error) { fetchError = error; break; }
-        const pageRows = data || [];
-        allRows = allRows.concat(pageRows);
-        if (pageRows.length < PAGE_SIZE) break;
-        if (from + PAGE_SIZE >= MAX_ROWS) reachedLimit = true;
+      let query = supabase.from('orders')
+        .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+        .order('created_at',{ascending:false})
+        .order('id',{ascending:false})
+        .range(from, from + PAGE_SIZE - 1);
+      if (profile.role === 'cashier') query = query.eq('guest_gender', normalizeGender(profile.cashier_gender));
+      const {data,error} = await query;
+      if (error) throw error;
+      const pageRows = Array.isArray(data) ? data.map(mapOrder) : [];
+      if (append) {
+        setOrders(current => {
+          const seen = new Set(current.map(order => order.id));
+          return [...current, ...pageRows.filter(order => !seen.has(order.id))];
+        });
+      } else {
+        setOrders(pageRows);
       }
+      setOrdersHasMore((data || []).length === PAGE_SIZE);
     } catch (error) {
-      fetchError = error;
+      setNotice(`Gagal memuat pesanan: ${error?.message || 'Kesalahan jaringan.'}. Data antrean sebelumnya dipertahankan.`);
     } finally {
+      ordersLoadInFlightRef.current = false;
       setLoadingOrders(false);
-    }
-    if (fetchError) {
-      setNotice(`Gagal memuat pesanan: ${fetchError.message || 'Kesalahan jaringan.'}. Data antrean sebelumnya dipertahankan; tekan Muat ulang untuk mencoba lagi.`);
-      return;
-    }
-    setOrders(allRows.map(mapOrder));
-    if (reachedLimit) {
-      setNotice(`Pemuatan mencapai batas aman ${MAX_ROWS.toLocaleString('id-ID')} pesanan. Gunakan rentang tanggal untuk menelusuri data lebih lama.`);
+      setOrdersLoadingMore(false);
+      if (ordersRefreshQueuedRef.current) {
+        ordersRefreshQueuedRef.current = false;
+        window.setTimeout(() => loadOrders(), 150);
+      }
     }
   }
   useEffect(() => { loadOrders(); }, [profile?.id, profile?.role, profile?.cashier_gender]);
   useEffect(() => {
-    if (!supabase || !profile || !['cashier','super_admin'].includes(profile.role)) return;
-    const channel = supabase.channel('wdi-orders-live').on('postgres_changes',{event:'*',schema:'public',table:'orders'},()=>loadOrders()).subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [profile?.id, profile?.role, profile?.cashier_gender]);
-
+    if (!supabase || !profile || !['cashier','super_admin'].includes(profile.role)) return undefined;
+    let refreshTimer = null;
+    const queueRefresh = () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        if (ordersLoadInFlightRef.current) ordersRefreshQueuedRef.current = true;
+        else loadOrders();
+        setOrdersRealtimeVersion(version => version + 1);
+      }, 400);
+    };
+    const channel = supabase.channel('wdi-orders-live')
+      .on('postgres_changes',{event:'*',schema:'public',table:'orders'},queueRefresh)
+      .subscribe();
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.id, profile?.role, profile?.cashier_gender, page]);
   const cartCount = cart.reduce((s,x)=>s+x.qty,0);
   const cartTotal = cart.reduce((s,x)=>s+x.qty*x.price,0);
   const visibleMenu = useMemo(()=>category==='Semua'?products:products.filter(p=>p.category===category),[category,products]);
@@ -411,7 +594,7 @@ function App() {
   }
   async function updateOrder(id,patch) {
     if (!supabase) return;
-    const target = orders.find(o => o.id === id);
+    const target = orders.find(o => o.id === id) || reportOrders.find(o => o.id === id) || distributionRows.find(o => o.id === id);
     if (!target) { setNotice('Pesanan tidak ditemukan pada antrean yang sedang dibuka. Muat ulang data.'); return; }
     if (profile?.role === 'cashier' && target.customer.gender !== normalizeGender(profile.cashier_gender)) {
       setNotice('Akun kasir tidak memiliki izin untuk mengubah pesanan dari jalur lain.'); return;
@@ -447,6 +630,8 @@ function App() {
 
       setNotice('Perubahan pesanan tersimpan dan telah diverifikasi dari database.');
       await loadOrders();
+      if (page === 'reports' && reportLoaded) await loadReportOrders();
+      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionDate);
     } catch (error) {
       setNotice(`Perubahan pesanan gagal dipastikan: ${error?.message || 'Kesalahan jaringan.'}. Muat ulang antrean untuk memeriksa status terbaru.`);
     }
@@ -528,13 +713,103 @@ function App() {
   const suggestedDistributionDate = availableDeliveryDates.find(d=>d >= new Date().toISOString().slice(0,10)) || availableDeliveryDates.at(-1) || nextDeliveryDate || new Date().toISOString().slice(0,10);
   const effectiveDistributionDate = distributionDate || suggestedDistributionDate;
   const effectiveDistributionGender = profile?.role === 'cashier' ? cashierGender : distributionGender;
-  const distributionOrders = scopedOrders.filter(o => o.deliveryDate === effectiveDistributionDate && o.status !== 'cancelled' && (!effectiveDistributionGender || effectiveDistributionGender === 'Semua' || o.customer.gender === effectiveDistributionGender));
+  const distributionOrders = distributionRows.filter(o => !effectiveDistributionGender || effectiveDistributionGender === 'Semua' || o.customer.gender === effectiveDistributionGender);
   const distributionGroups = Object.values(distributionOrders.reduce((acc, order) => { const key = `${order.customer.gender} Â· ${order.customer.dorm || 'Tanpa asrama'}`; (acc[key] ||= []).push(order); return acc; }, {})).sort((a,b) => `${a[0].customer.gender}-${a[0].customer.dorm}`.localeCompare(`${b[0].customer.gender}-${b[0].customer.dorm}`,'id'));
   const invalidReportRange = Boolean(reportFrom && reportTo && reportFrom > reportTo);
-  // Rentang laporan menggunakan tanggal pengiriman, dan daftar ini dipakai bersama
-  // oleh pratinjau maupun ekspor agar hasil Excel selalu mengikuti filter di layar.
-  const reportOrders = invalidReportRange ? [] : orders.filter(o => (!reportFrom || o.deliveryDate >= reportFrom) && (!reportTo || o.deliveryDate <= reportTo) && (reportGender === 'Semua' || o.customer.gender === reportGender));
-  async function loadCashierAccounts() {
+
+  async function loadDistributionOrders(date = effectiveDistributionDate) {
+    if (!supabase || !isStaff || !date) return;
+    const requestId = ++distributionLoadVersionRef.current;
+    const PAGE_SIZE = 500;
+    const MAX_ROWS = 20000;
+    let allRows = [];
+    let reachedLimit = false;
+    setDistributionLoading(true);
+    setDistributionRows([]);
+    setDistributionLimitReached(false);
+    try {
+      for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
+        let query = supabase.from('orders')
+          .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+          .eq('delivery_date', date)
+          .order('created_at',{ascending:false})
+          .order('id',{ascending:false})
+          .range(from, from + PAGE_SIZE - 1);
+        if (profile?.role === 'cashier') query = query.eq('guest_gender', normalizeGender(profile.cashier_gender));
+        const {data,error} = await query;
+        if (error) throw error;
+        const rows = Array.isArray(data) ? data : [];
+        allRows = allRows.concat(rows);
+        if (rows.length < PAGE_SIZE) break;
+        if (from + PAGE_SIZE >= MAX_ROWS) reachedLimit = true;
+      }
+      if (requestId !== distributionLoadVersionRef.current) return;
+      setDistributionRows(allRows.map(mapOrder));
+      setDistributionLimitReached(reachedLimit);
+      if (reachedLimit) setNotice('Daftar distribusi mencapai batas 20.000 pesanan untuk satu tanggal. Periksa pembagian tanggal atau hubungi admin.');
+    } catch (error) {
+      if (requestId === distributionLoadVersionRef.current) setNotice(`Gagal memuat pesanan distribusi: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      if (requestId === distributionLoadVersionRef.current) setDistributionLoading(false);
+    }
+  }
+  useEffect(() => {
+    if (page === 'distribution' && isStaff && effectiveDistributionDate) loadDistributionOrders(effectiveDistributionDate);
+    else if (page !== 'distribution') setDistributionRows([]);
+  }, [page, profile?.id, profile?.role, profile?.cashier_gender, effectiveDistributionDate, ordersRealtimeVersion]);
+
+  async function loadReportOrders() {
+    if (!supabase || !isAdmin || reportLoadInFlightRef.current) return;
+    if (!reportFrom && !reportTo) {
+      setReportLoaded(false);
+      setNotice('Pilih minimal satu batas tanggal pengiriman agar laporan mengambil data sesuai periode, bukan seluruh riwayat sekaligus.');
+      return;
+    }
+    if (invalidReportRange) {
+      setReportLoaded(false);
+      setNotice('Tanggal mulai tidak boleh melewati tanggal akhir.');
+      return;
+    }
+    const PAGE_SIZE = 500;
+    const MAX_ROWS = 50000;
+    let allRows = [];
+    let reachedLimit = false;
+    reportLoadInFlightRef.current = true;
+    setReportLoading(true);
+    setReportLoaded(false);
+    setReportLimitReached(false);
+    setReportOrders([]);
+    try {
+      for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
+        let query = supabase.from('orders')
+          .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+          .order('created_at',{ascending:false})
+          .order('id',{ascending:false})
+          .range(from, from + PAGE_SIZE - 1);
+        if (reportFrom) query = query.gte('delivery_date', reportFrom);
+        if (reportTo) query = query.lte('delivery_date', reportTo);
+        if (reportGender !== 'Semua') query = query.eq('guest_gender', reportGender);
+        const {data,error} = await query;
+        if (error) throw error;
+        const rows = Array.isArray(data) ? data : [];
+        allRows = allRows.concat(rows);
+        if (rows.length < PAGE_SIZE) break;
+        if (from + PAGE_SIZE >= MAX_ROWS) reachedLimit = true;
+      }
+      setReportOrders(allRows.map(mapOrder));
+      setReportLimitReached(reachedLimit);
+      setReportLoaded(true);
+      if (reachedLimit) setNotice('Laporan mencapai batas aman 50.000 transaksi. Persempit rentang tanggal sebelum mengekspor agar laporan tidak terpotong.');
+      else setNotice(`Laporan berhasil dimuat: ${allRows.length} transaksi.`);
+    } catch (error) {
+      setReportOrders([]);
+      setReportLoaded(false);
+      setNotice(`Gagal memuat laporan: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      reportLoadInFlightRef.current = false;
+      setReportLoading(false);
+    }
+  }  async function loadCashierAccounts() {
     if (!supabase || !isAdmin) return;
     setCashierAccountsBusy(true);
     const {data,error} = await supabase.from('profiles').select('id,full_name,role,cashier_gender').eq('role','cashier').order('full_name');
@@ -551,6 +826,8 @@ function App() {
   async function exportWorkbook() {
     if (!isAdmin) { setNotice('Ekspor laporan hanya tersedia untuk Super Admin.'); return; }
     if (invalidReportRange) { setNotice('Rentang tanggal tidak valid. Tanggal mulai harus sama dengan atau sebelum tanggal akhir.'); return; }
+    if (reportLoading || !reportLoaded) { setNotice('Muat laporan berdasarkan rentang tanggal terlebih dahulu sebelum mengekspor.'); return; }
+    if (reportLimitReached) { setNotice('Laporan belum lengkap karena mencapai batas 50.000 transaksi. Persempit rentang tanggal sebelum mengekspor.'); return; }
     if (!reportOrders.length) { setNotice('Tidak ada pesanan pada rentang tanggal pengiriman yang dipilih.'); return; }
     try {
       // Ambil seluruh nama produk katalog, bukan hanya produk yang laku pada periode ini.
@@ -644,10 +921,10 @@ function App() {
         {cartCount>0&&<div className="mobile-cart-dock"><button type="button" className="mobile-cart-summary" onClick={()=>setCartOpen(true)} aria-expanded={cartOpen} aria-controls="mobile-cart-sheet"><span className="mobile-cart-icon">ðŸ›’ <b>{cartCount}</b></span><span className="mobile-cart-label"><strong>Lihat keranjang</strong><small>{cartCount} item dipilih</small></span><strong className="mobile-cart-total">{money(cartTotal)}</strong><span className="mobile-cart-chevron">â†‘</span></button></div>}
         {cartOpen&&cartCount>0&&<div className="mobile-cart-layer" onClick={()=>setCartOpen(false)}><section id="mobile-cart-sheet" className="mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-cart-title" onClick={e=>e.stopPropagation()}><div className="mobile-cart-sheet-head"><div><p className="eyebrow">LANGKAH 03</p><h2 id="mobile-cart-title">Keranjang pesanan</h2></div><button type="button" className="mobile-cart-close" onClick={()=>setCartOpen(false)} aria-label="Tutup keranjang">Ã—</button></div><div className="mobile-cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>âˆ’</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}</div><label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting?'Menyimpan pesananâ€¦':'Simpan pesanan & lanjut WhatsApp'} <span>â†’</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></section></div>}
       </section>}
-      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu konfirmasi</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Sedang diproses</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asramaâ€¦"/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesananâ€¦</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/></section>}
-      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Hanya pesanan berstatus siap diserahkan yang dapat ditandai sudah diserahkan.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button className="primary" onClick={()=>printKitchenTickets()}>Cetak semua tiket dapur</button><button onClick={loadOrders}>Muat ulang pesanan</button></div></div><div className="stats"><div className="stat-card"><small>Jumlah pesanan</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender} Â· {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className} Â· {o.items.reduce((n,i)=>n+i.qty,0)} item Â· {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>Ã— {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span><button onClick={()=>printKitchenTickets([o])}>Cetak tiket</button><button className="primary" onClick={()=>updateOrder(o.id,{status:'delivered'})} disabled={o.status!=='ready'}>Tandai diserahkan</button></div></article>)}</div>)}</section>}
-      {page==='admin'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Portal Super Admin</h1><p className="muted">Pemantauan gabungan antrean Putra dan Putri.</p></div><div className="stats"><div className="stat-card"><small>Jumlah transaksi</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Nilai seluruh pesanan</small><strong>{money(orders.reduce((s,o)=>s+o.total,0))}</strong></div><div className="stat-card"><small>Pesanan belum selesai</small><strong>{orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length}</strong></div></div><div className="split-stats"><div className="panel"><span className="category-label">SANTRI PUTRA</span><h2>{orders.filter(o=>o.customer.gender==='Putra').length}</h2><p className="muted">Pesanan masuk</p></div><div className="panel"><span className="category-label">SANTRI PUTRI</span><h2>{orders.filter(o=>o.customer.gender==='Putri').length}</h2><p className="muted">Pesanan masuk</p></div></div><div className="panel settings-panel"><h2>Laporan dan ekspor Excel</h2><p className="muted">Pilih rentang tanggal pengiriman, lihat transaksi yang masuk dalam periode tersebut, lalu unduh laporan Excel dengan satu baris untuk setiap transaksi santri.</p><button className="primary" type="button" onClick={()=>setPage('reports')}>Buka Laporan â†’</button></div></section>}
-      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Pratinjau serta seluruh lembar Excel mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} onChange={e=>setReportFrom(e.target.value)}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} onChange={e=>setReportTo(e.target.value)}/></label><label>Kategori santri<select value={reportGender} onChange={e=>setReportGender(e.target.value)}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');}}>Reset filter</button><button type="button" onClick={loadOrders}>Muat ulang</button><button className="primary" type="button" onClick={exportWorkbook}>Unduh Excel (.xlsx)</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'} Â· {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/>}</section>}
+      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asramaâ€¦"/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesananâ€¦</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/><div className="toolbar"><span className="muted">Menampilkan {orders.length} pesanan terbaru yang sudah dimuat.</span>{ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
+      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Hanya pesanan berstatus siap diserahkan yang dapat ditandai sudah diserahkan.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button className="primary" onClick={()=>printKitchenTickets()}>Cetak semua tiket dapur</button><button onClick={loadOrders}>Muat ulang pesanan</button></div></div>{distributionLoading&&<p className="muted">Memuat semua pesanan pada tanggal distribusi...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada tanggal ini</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender} Â· {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className} Â· {o.items.reduce((n,i)=>n+i.qty,0)} item Â· {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>Ã— {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span><button onClick={()=>printKitchenTickets([o])}>Cetak tiket</button><button className="primary" onClick={()=>updateOrder(o.id,{status:'delivered'})} disabled={o.status!=='ready'}>Tandai diserahkan</button></div></article>)}</div>)}</section>}
+      {page==='admin'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Portal Super Admin</h1><p className="muted">Pemantauan gabungan antrean Putra dan Putri.</p></div><div className="stats"><div className="stat-card"><small>Pesanan terbaru dimuat</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Nilai pesanan terbaru dimuat</small><strong>{money(orders.reduce((s,o)=>s+o.total,0))}</strong></div><div className="stat-card"><small>Belum selesai (pesanan dimuat)</small><strong>{orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length}</strong></div></div><div className="split-stats"><div className="panel"><span className="category-label">SANTRI PUTRA</span><h2>{orders.filter(o=>o.customer.gender==='Putra').length}</h2><p className="muted">Pesanan masuk</p></div><div className="panel"><span className="category-label">SANTRI PUTRI</span><h2>{orders.filter(o=>o.customer.gender==='Putri').length}</h2><p className="muted">Pesanan masuk</p></div></div><div className="panel settings-panel"><h2>Laporan dan ekspor Excel</h2><p className="muted">Pilih rentang tanggal pengiriman, lihat transaksi yang masuk dalam periode tersebut, lalu unduh laporan Excel dengan satu baris untuk setiap transaksi santri.</p><button className="primary" type="button" onClick={()=>setPage('reports')}>Buka Laporan â†’</button></div></section>}
+      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Pratinjau serta seluruh lembar Excel mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'} Â· {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/>}</section>}
       {page==='catalog'&&isAdmin&&<section>
         <div className="page-intro"><p className="eyebrow">MANAJEMEN MENU</p><h1>Kelola katalog</h1><p className="muted">Tambah dan ubah produk, harga, kategori, serta ketersediaan yang tampil di halaman pelanggan.</p></div>
         <form className="panel settings-panel catalog-form" onSubmit={saveProduct}>
