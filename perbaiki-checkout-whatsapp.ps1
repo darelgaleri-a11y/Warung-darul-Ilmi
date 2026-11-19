@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 $projectRoot = Get-Location
 $appPath = Join-Path $projectRoot 'src\App.jsx'
@@ -129,27 +129,21 @@ $newFunction = @'
 '@
 $content = $content.Substring(0, $startIndex) + $newFunction + $content.Substring($endIndex)
 
-$buttonOldRaw = @'
+$buttonOld = @'
 <button className="primary full" onClick={placeOrder}>Simpan pesanan & lanjut WhatsApp <span>→</span></button>
-'@
-$buttonOld = $buttonOldRaw.Trim()
-$buttonNewRaw = @'
+'@.Trim()
+$buttonNew = @'
 <button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting ? 'Menyimpan pesanan…' : 'Simpan pesanan & lanjut WhatsApp'} <span>→</span></button>
-'@
-$buttonNew = $buttonNewRaw.Trim()
+'@.Trim()
 if (-not $content.Contains($buttonOld)) {
     throw 'Tombol checkout tidak cocok dengan versi yang diaudit. Tidak ada perubahan file yang disimpan.'
 }
 $content = $content.Replace($buttonOld, $buttonNew)
 
-$noticeOldRaw = @'
+$noticeOld = @'
 {notice&&<div className="notice notice-toast" role="status"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Tutup pemberitahuan">×</button></div>}
-'@
-$noticeOld = $noticeOldRaw.Trim()
-$noticeFallback = @'
-      {whatsappFallbackUrl && <div className="notice whatsapp-fallback" role="status"><span>Pesanan sudah tersimpan. Tekan tautan ini untuk membuka WhatsApp dan kirim konfirmasi kepada kasir.</span><a className="primary" href={whatsappFallbackUrl} target="_blank" rel="noopener noreferrer">Buka WhatsApp untuk mengirim pesanan</a><button type="button" onClick={()=>setWhatsappFallbackUrl('')} aria-label="Tutup tautan WhatsApp">Tutup</button></div>}
-'@
-$noticeNew = $noticeOld + "`r`n" + $noticeFallback.TrimEnd()
+'@.Trim()
+$noticeNew = $noticeOld + "`r`n      {whatsappFallbackUrl && <div className=\"notice whatsapp-fallback\" role=\"status\"><span>Pesanan sudah tersimpan. Tekan tautan ini untuk membuka WhatsApp dan kirim konfirmasi kepada kasir.</span><a className=\"primary\" href={whatsappFallbackUrl} target=\"_blank\" rel=\"noopener noreferrer\">Buka WhatsApp untuk mengirim pesanan</a><button type=\"button\" onClick={()=>setWhatsappFallbackUrl('')} aria-label=\"Tutup tautan WhatsApp\">Tutup</button></div>}"
 if (-not $content.Contains($noticeOld)) {
     throw 'Area pemberitahuan checkout tidak ditemukan. Tidak ada perubahan file yang disimpan.'
 }
