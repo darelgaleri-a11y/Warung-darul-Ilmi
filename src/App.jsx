@@ -419,8 +419,37 @@ function App() {
     if (patch.status === 'delivered' && target.status !== 'ready') {
       setNotice('Pesanan hanya dapat ditandai diserahkan setelah berstatus Siap diserahkan.'); return;
     }
-    const {error}=await supabase.from('orders').update(patch).eq('id',id);
-    if (error) setNotice(`Perubahan gagal disimpan: ${error.message}`); else { setNotice('Perubahan pesanan tersimpan.'); await loadOrders(); }
+
+    try {
+      const {data:updatedOrder,error}=await supabase
+        .from('orders')
+        .update(patch)
+        .eq('id',id)
+        .select('id,status')
+        .maybeSingle();
+
+      if (error) {
+        setNotice(`Perubahan gagal disimpan: ${error.message}`);
+        return;
+      }
+
+      if (!updatedOrder || updatedOrder.id !== id) {
+        setNotice('Perubahan tidak terkonfirmasi: baris pesanan tidak ditemukan atau tidak dapat diakses. Muat ulang antrean sebelum mencoba lagi.');
+        await loadOrders();
+        return;
+      }
+
+      if (patch.status !== undefined && updatedOrder.status !== patch.status) {
+        setNotice(`Perubahan tidak terkonfirmasi: server mengembalikan status "${updatedOrder.status}" yang berbeda dari permintaan. Muat ulang antrean untuk memeriksa status terbaru.`);
+        await loadOrders();
+        return;
+      }
+
+      setNotice('Perubahan pesanan tersimpan dan telah diverifikasi dari database.');
+      await loadOrders();
+    } catch (error) {
+      setNotice(`Perubahan pesanan gagal dipastikan: ${error?.message || 'Kesalahan jaringan.'}. Muat ulang antrean untuk memeriksa status terbaru.`);
+    }
   }
   async function saveSettings(e) {
     e.preventDefault();
