@@ -1,26 +1,21 @@
 -- Warung Darul Ilmi: repair guest checkout token-hash column/function mismatch.
--- The repository's original guest-checkout migration creates this column as TEXT,
--- while a later migration accidentally redefined the function to write BYTEA.
--- This migration normalizes either existing representation to hexadecimal TEXT.
--- Existing SHA-256 digests are preserved; orders are not deleted or recreated.
+-- Normalizes either existing TEXT or BYTEA storage into hexadecimal TEXT.
+-- Existing digests are preserved; orders are not deleted or recreated.
 
 begin;
 
--- Support databases that may currently have either TEXT or BYTEA from older scripts.
 do $$
 declare
   v_data_type text;
 begin
-  select c.data_type
-    into v_data_type
+  select c.data_type into v_data_type
   from information_schema.columns c
   where c.table_schema = 'public'
     and c.table_name = 'orders'
     and c.column_name = 'guest_access_token_hash';
 
   if v_data_type is null then
-    alter table public.orders
-      add column guest_access_token_hash text;
+    alter table public.orders add column guest_access_token_hash text;
   elsif v_data_type = 'bytea' then
     alter table public.orders
       alter column guest_access_token_hash type text
@@ -65,21 +60,16 @@ begin
   if length(trim(coalesce(p_guest_name, ''))) < 2 then
     raise exception 'Nama santri wajib diisi.';
   end if;
-
   if p_guest_gender is null or p_guest_gender not in ('Putra', 'Putri') then
     raise exception 'Kategori santri tidak valid.';
   end if;
-
   if length(trim(coalesce(p_guest_dormitory, ''))) < 1
      or length(trim(coalesce(p_guest_class, ''))) < 1 then
     raise exception 'Asrama dan kelas wajib diisi.';
   end if;
-
-  if p_access_token is null
-     or p_access_token !~ '^[0-9a-fA-F]{64}$' then
+  if p_access_token is null or p_access_token !~ '^[0-9a-fA-F]{64}$' then
     raise exception 'Token akses pesanan tidak valid.';
   end if;
-
   if coalesce(jsonb_typeof(p_items), '') <> 'array' then
     raise exception 'Keranjang kosong atau format item tidak valid.';
   end if;
@@ -87,7 +77,6 @@ begin
     raise exception 'Keranjang kosong atau jumlah item melebihi batas.';
   end if;
 
-  -- TEXT stores the 64-character hexadecimal representation of the SHA-256 digest.
   v_token_hash := encode(
     extensions.digest(convert_to(lower(p_access_token), 'UTF8'), 'sha256'),
     'hex'
@@ -104,7 +93,7 @@ begin
     public.next_delivery_date(), v_token_hash
   )
   returning id, orders.order_number, orders.delivery_date
-  into v_order_id, v_order_number, v_delivery_date;
+    into v_order_id, v_order_number, v_delivery_date;
 
   for v_item in select value from jsonb_array_elements(p_items)
   loop
@@ -129,7 +118,6 @@ begin
     if not found then
       raise exception 'Produk ID % tidak ditemukan atau tidak tersedia.', v_product_id;
     end if;
-
     v_count := v_count + 1;
   end loop;
 
@@ -137,10 +125,8 @@ begin
     raise exception 'Tidak ada item pesanan yang valid.';
   end if;
 
-  select o.total_amount
-    into v_total
-  from public.orders o
-  where o.id = v_order_id;
+  select o.total_amount into v_total
+  from public.orders o where o.id = v_order_id;
 
   return query select v_order_id, v_order_number, v_delivery_date, v_total;
 end;
