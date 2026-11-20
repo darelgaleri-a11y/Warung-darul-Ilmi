@@ -138,3 +138,12 @@ button:disabled{opacity:.6;cursor:wait}
 .order-edit-footer strong{color:#174737;font-size:17px}
 .order-edit-footer .primary{background:#174737;color:#fff;border:0}
 @media(max-width:600px){.order-edit-overlay{padding:8px}.order-edit-modal{padding:15px;max-height:95vh}.order-edit-grid{grid-template-columns:1fr}.order-edit-item{grid-template-columns:minmax(0,1fr) 82px}.order-edit-item button{grid-column:1/-1}.order-edit-add{grid-template-columns:1fr}.order-edit-footer{align-items:stretch;flex-direction:column}.order-action-buttons{width:100%}.order-action-buttons button{flex:1}}
+/* WDI update: tab Sampah, soft delete, dan filter rentang distribusi */
+.cashier-view-tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.cashier-view-tabs button{min-height:40px;border:1px solid #dcd8ca;background:#f8f6ef;border-radius:9px;padding:8px 13px;font:700 11px 'DM Sans';color:#244738;cursor:pointer}
+.cashier-view-tabs button.active{background:#174737;color:#fff;border-color:#174737}
+.order-action-buttons button.danger{background:#fff2ef;color:#9b3425;border:1px solid #efc8bf}
+.order-action-buttons button.restore{background:#edf6ef;color:#195b37;border:1px solid #bddbc7}
+.trash-retention{display:block;align-self:center;color:#7c7160;font-size:10px;line-height:1.5}
+.distribution-tools{align-items:end}
+@media(max-width:600px){.cashier-view-tabs{width:100%}.cashier-view-tabs button{flex:1}.trash-retention{width:100%}}

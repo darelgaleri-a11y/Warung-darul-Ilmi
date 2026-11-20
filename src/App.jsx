@@ -26,7 +26,7 @@ function mapOrder(row) {
   const items = (row.order_items || []).map(x => ({ id: x.product_id ?? x.id, productId: x.product_id ?? null, name: x.product_name_snapshot, price: Number(x.unit_price_snapshot), qty: x.quantity }));
   return { id: row.id, number: row.order_number, createdAt: row.created_at, deliveryDate: row.delivery_date,
     customer: { name: row.guest_name || row.profiles?.full_name || 'Pelanggan', gender: normalizeGender(row.guest_gender), dorm: row.guest_dormitory || '-', className: row.guest_class || '-', phone: row.guest_phone || '' },
-    note: row.customer_note || '', items, total: Number(row.total_amount || 0), status: row.status, paymentState: row.payment_state };
+    note: row.customer_note || '', items, total: Number(row.total_amount || 0), status: row.status, paymentState: row.payment_state, deletedAt: row.deleted_at, deletedBy: row.deleted_by };
 }
 function App() {
   const [page, setPage] = useState('order');
@@ -71,7 +71,8 @@ function App() {
   const [overrideDelivery, setOverrideDelivery] = useState(false);
   const [overrideNote, setOverrideNote] = useState('');
   const [overrideBusy, setOverrideBusy] = useState(false);
-  const [distributionDate, setDistributionDate] = useState('');
+  const [distributionFrom, setDistributionFrom] = useState('');
+  const [distributionTo, setDistributionTo] = useState('');
   const [distributionGender, setDistributionGender] = useState('Semua');  const [adminProducts, setAdminProducts] = useState([]);
   const [adminCategories, setAdminCategories] = useState([]);
   const [catalogBusy, setCatalogBusy] = useState(false);
@@ -84,6 +85,9 @@ function App() {
   const [reportTo, setReportTo] = useState('');
   const [reportGender, setReportGender] = useState('Semua');
   const [cashierGenderFilter, setCashierGenderFilter] = useState('Semua');
+  const [trashOrders, setTrashOrders] = useState([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
   const [orderEditForm, setOrderEditForm] = useState(null);
   const [orderEditProducts, setOrderEditProducts] = useState([]);
@@ -407,6 +411,7 @@ function App() {
     try {
       let query = supabase.from('orders')
         .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+        .is('deleted_at', null)
         .order('created_at',{ascending:false})
         .order('id',{ascending:false})
         .range(from, from + PAGE_SIZE - 1);
@@ -435,7 +440,34 @@ function App() {
       }
     }
   }
+  async function loadTrashOrders() {
+    if (!supabase || !profile || !['cashier','super_admin'].includes(profile.role)) return;
+    if (profile.role === 'cashier' && !normalizeGender(profile.cashier_gender)) {
+      setTrashOrders([]);
+      return;
+    }
+    setTrashLoading(true);
+    try {
+      let query = supabase.from('orders')
+        .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+        .not('deleted_at', 'is', null)
+        .order('deleted_at', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (profile.role === 'cashier') query = query.eq('guest_gender', normalizeGender(profile.cashier_gender));
+      const { data, error } = await query;
+      if (error) throw error;
+      setTrashOrders((data || []).map(mapOrder));
+    } catch (error) {
+      setNotice(`Gagal memuat Sampah pesanan: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setTrashLoading(false);
+    }
+  }
   useEffect(() => { loadOrders(); }, [profile?.id, profile?.role, profile?.cashier_gender]);
+  useEffect(() => {
+    if (page === 'cashier' && isStaff) loadTrashOrders();
+  }, [page, profile?.id, profile?.role, profile?.cashier_gender, ordersRealtimeVersion]);
   useEffect(() => {
     if (!supabase || !profile || !['cashier','super_admin'].includes(profile.role)) return undefined;
     let refreshTimer = null;
@@ -706,7 +738,7 @@ function App() {
       setNotice(`Pesanan ${orderNumber} berhasil diperbarui. Total: ${money(result?.total_amount ?? requestedTotal)}.`);
       await loadOrders();
       if (page === 'reports' && reportLoaded) await loadReportOrders();
-      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionDate);
+      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionFrom, effectiveDistributionTo);
     } catch (error) {
       setNotice(`Pesanan gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}`);
     } finally {
@@ -749,11 +781,47 @@ function App() {
       setNotice('Perubahan pesanan tersimpan dan telah diverifikasi dari database.');
       await loadOrders();
       if (page === 'reports' && reportLoaded) await loadReportOrders();
-      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionDate);
+      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionFrom, effectiveDistributionTo);
     } catch (error) {
       setNotice(`Perubahan pesanan gagal dipastikan: ${error?.message || 'Kesalahan jaringan.'}. Muat ulang antrean untuk memeriksa status terbaru.`);
     }
   }
+  async function softDeleteOrder(id) {
+    if (!supabase || !isStaff) return;
+    const target = orders.find(order => order.id === id);
+    if (!target) { setNotice('Pesanan tidak ditemukan pada antrean aktif. Muat ulang antrean.'); return; }
+    if (profile?.role === 'cashier' && target.customer.gender !== normalizeGender(profile.cashier_gender)) {
+      setNotice('Akun kasir tidak memiliki izin menghapus pesanan dari jalur lain.');
+      return;
+    }
+    try {
+      const { error } = await supabase.rpc('soft_delete_staff_order', { p_order_id: id });
+      if (error) throw error;
+      setNotice(`Pesanan ${target.number} dipindahkan ke Sampah. Pesanan dapat dipulihkan selama 3 hari.`);
+      await Promise.all([loadOrders(), loadTrashOrders()]);
+    } catch (error) {
+      setNotice(`Pesanan gagal dipindahkan ke Sampah: ${error?.message || 'Kesalahan jaringan.'}`);
+    }
+  }
+
+  async function restoreOrder(id) {
+    if (!supabase || !isStaff) return;
+    const target = trashOrders.find(order => order.id === id);
+    if (!target) { setNotice('Pesanan tidak ditemukan di Sampah. Muat ulang data.'); return; }
+    if (profile?.role === 'cashier' && target.customer.gender !== normalizeGender(profile.cashier_gender)) {
+      setNotice('Akun kasir tidak memiliki izin memulihkan pesanan dari jalur lain.');
+      return;
+    }
+    try {
+      const { error } = await supabase.rpc('restore_staff_order', { p_order_id: id });
+      if (error) throw error;
+      setNotice(`Pesanan ${target.number} berhasil dipulihkan ke antrean aktif.`);
+      await Promise.all([loadOrders(), loadTrashOrders()]);
+    } catch (error) {
+      setNotice(`Pesanan gagal dipulihkan: ${error?.message || 'Kesalahan jaringan.'}`);
+    }
+  }
+
   async function saveSettings(e) {
     e.preventDefault();
     if (!supabase) { setNotice('Supabase belum dikonfigurasi. Pengaturan tidak disimpan.'); return; }
@@ -829,14 +897,20 @@ function App() {
   const filteredOrders = scopedOrders.filter(o => (filter==='Semua'||o.status===statusValues[filter]) && (effectiveCashierGenderFilter==='Semua'||o.customer.gender===effectiveCashierGenderFilter) && `${o.number} ${o.customer.name} ${o.customer.dorm} ${o.customer.className}`.toLowerCase().includes(search.trim().toLowerCase()));
   const availableDeliveryDates = [...new Set(scopedOrders.map(o=>o.deliveryDate).filter(Boolean))].sort();
   const suggestedDistributionDate = availableDeliveryDates.find(d=>d >= new Date().toISOString().slice(0,10)) || availableDeliveryDates.at(-1) || nextDeliveryDate || new Date().toISOString().slice(0,10);
-  const effectiveDistributionDate = distributionDate || suggestedDistributionDate;
+  const effectiveDistributionFrom = distributionFrom || suggestedDistributionDate;
+  const effectiveDistributionTo = distributionTo || effectiveDistributionFrom;
+  const invalidDistributionRange = Boolean(effectiveDistributionFrom && effectiveDistributionTo && effectiveDistributionFrom > effectiveDistributionTo);
   const effectiveDistributionGender = profile?.role === 'cashier' ? cashierGender : distributionGender;
   const distributionOrders = distributionRows.filter(o => !effectiveDistributionGender || effectiveDistributionGender === 'Semua' || o.customer.gender === effectiveDistributionGender);
-  const distributionGroups = Object.values(distributionOrders.reduce((acc, order) => { const key = `${order.customer.gender}  |  ${order.customer.dorm || 'Tanpa asrama'}`; (acc[key] ||= []).push(order); return acc; }, {})).sort((a,b) => `${a[0].customer.gender}-${a[0].customer.dorm}`.localeCompare(`${b[0].customer.gender}-${b[0].customer.dorm}`,'id'));
+  const distributionGroups = Object.values(distributionOrders.reduce((acc, order) => { const key = `${order.deliveryDate}::${order.customer.gender}::${order.customer.dorm || 'Tanpa asrama'}`; (acc[key] ||= []).push(order); return acc; }, {})).sort((a,b) => `${a[0].deliveryDate}-${a[0].customer.gender}-${a[0].customer.dorm}`.localeCompare(`${b[0].deliveryDate}-${b[0].customer.gender}-${b[0].customer.dorm}`,'id'));
   const invalidReportRange = Boolean(reportFrom && reportTo && reportFrom > reportTo);
 
-  async function loadDistributionOrders(date = effectiveDistributionDate) {
-    if (!supabase || !isStaff || !date) return;
+  async function loadDistributionOrders(fromDate = effectiveDistributionFrom, toDate = effectiveDistributionTo) {
+    if (!supabase || !isStaff || !fromDate || !toDate) return;
+    if (fromDate > toDate) {
+      setNotice('Tanggal mulai distribusi tidak boleh melewati tanggal akhir.');
+      return;
+    }
     const requestId = ++distributionLoadVersionRef.current;
     const PAGE_SIZE = 500;
     const MAX_ROWS = 20000;
@@ -849,9 +923,12 @@ function App() {
       for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
         let query = supabase.from('orders')
           .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
-          .eq('delivery_date', date)
-          .order('created_at',{ascending:false})
-          .order('id',{ascending:false})
+          .gte('delivery_date', fromDate)
+          .lte('delivery_date', toDate)
+          .is('deleted_at', null)
+          .order('delivery_date', { ascending: true })
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
           .range(from, from + PAGE_SIZE - 1);
         if (profile?.role === 'cashier') query = query.eq('guest_gender', normalizeGender(profile.cashier_gender));
         const {data,error} = await query;
@@ -864,7 +941,7 @@ function App() {
       if (requestId !== distributionLoadVersionRef.current) return;
       setDistributionRows(allRows.map(mapOrder));
       setDistributionLimitReached(reachedLimit);
-      if (reachedLimit) setNotice('Daftar distribusi mencapai batas 20.000 pesanan untuk satu tanggal. Periksa pembagian tanggal atau hubungi admin.');
+      if (reachedLimit) setNotice('Daftar distribusi mencapai batas 20.000 pesanan untuk rentang tanggal ini. Persempit rentang tanggal atau hubungi admin.');
     } catch (error) {
       if (requestId === distributionLoadVersionRef.current) setNotice(`Gagal memuat pesanan distribusi: ${error?.message || 'Kesalahan jaringan.'}`);
     } finally {
@@ -872,9 +949,9 @@ function App() {
     }
   }
   useEffect(() => {
-    if (page === 'distribution' && isStaff && effectiveDistributionDate) loadDistributionOrders(effectiveDistributionDate);
+    if (page === 'distribution' && isStaff && effectiveDistributionFrom && effectiveDistributionTo && !invalidDistributionRange) loadDistributionOrders(effectiveDistributionFrom, effectiveDistributionTo);
     else if (page !== 'distribution') setDistributionRows([]);
-  }, [page, profile?.id, profile?.role, profile?.cashier_gender, effectiveDistributionDate, ordersRealtimeVersion]);
+  }, [page, profile?.id, profile?.role, profile?.cashier_gender, effectiveDistributionFrom, effectiveDistributionTo, invalidDistributionRange, ordersRealtimeVersion]);
 
   async function loadReportOrders() {
     if (!supabase || !isAdmin || reportLoadInFlightRef.current) return;
@@ -901,6 +978,7 @@ function App() {
       for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
         let query = supabase.from('orders')
           .select('*,order_items(id,product_id,product_name_snapshot,unit_price_snapshot,quantity)')
+          .is('deleted_at', null)
           .order('created_at',{ascending:false})
           .order('id',{ascending:false})
           .range(from, from + PAGE_SIZE - 1);
@@ -1111,8 +1189,8 @@ function App() {
         {cartCount>0&&<div className="mobile-cart-dock"><button type="button" className="mobile-cart-summary" onClick={()=>setCartOpen(true)} aria-expanded={cartOpen} aria-controls="mobile-cart-sheet"><span className="mobile-cart-icon">{String.fromCodePoint(0x1F6D2)} <b>{cartCount}</b></span><span className="mobile-cart-label"><strong>Lihat keranjang</strong><small>{cartCount} item dipilih</small></span><strong className="mobile-cart-total">{money(cartTotal)}</strong><span className="mobile-cart-chevron">^</span></button></div>}
         {cartOpen&&cartCount>0&&<div className="mobile-cart-layer" onClick={()=>setCartOpen(false)}><section id="mobile-cart-sheet" className="mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-cart-title" onClick={e=>e.stopPropagation()}><div className="mobile-cart-sheet-head"><div><p className="eyebrow">LANGKAH 03</p><h2 id="mobile-cart-title">Keranjang pesanan</h2></div><button type="button" className="mobile-cart-close" onClick={()=>setCartOpen(false)} aria-label="Tutup keranjang">x</button></div><div className="mobile-cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>-</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}</div><label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting?'Menyimpan pesanan...':'Simpan pesanan & lanjut WhatsApp'} <span>{'→'}</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></section></div>}
       </section>}
-      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama..."/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesanan...</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor}/><div className="toolbar"><span className="muted">Menampilkan {orders.length} pesanan terbaru yang sudah dimuat.</span>{ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
-      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Status penyerahan diubah oleh kasir dari halaman antrean. Halaman ini hanya untuk pemantauan distribusi.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button onClick={()=>loadDistributionOrders(effectiveDistributionDate)}>Muat ulang pesanan</button></div></div>{distributionLoading&&<p className="muted">Memuat semua pesanan pada tanggal distribusi...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada tanggal ini</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender}  |  {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className}  |  {o.items.reduce((n,i)=>n+i.qty,0)} item  |  {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>x {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span></div></article>)}</div>)}</section>}
+      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div>{!showTrash&&<div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div>}<div className="toolbar"><h2>{showTrash?'Sampah pesanan':'Antrean pesanan'}</h2><div className="cashier-view-tabs"><button type="button" className={!showTrash?'active':''} onClick={()=>setShowTrash(false)}>Antrean aktif ({orders.length})</button><button type="button" className={showTrash?'active':''} onClick={()=>setShowTrash(true)}>Sampah ({trashOrders.length})</button></div>{!showTrash&&<input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama..."/>}{!showTrash&&<label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label>}{!showTrash&&<select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select>}{!showTrash&&<button onClick={loadOrders}>Muat ulang</button>}{showTrash&&<button onClick={loadTrashOrders}>Muat ulang Sampah</button>}</div>{!showTrash&&loadingOrders&&<p className="muted">Memuat pesanan...</p>}{showTrash&&trashLoading&&<p className="muted">Memuat Sampah pesanan...</p>}<OrderList orders={showTrash?trashOrders:filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor} onDelete={softDeleteOrder} onRestore={restoreOrder} trashMode={showTrash}/><div className="toolbar"><span className="muted">{showTrash?`Menampilkan ${trashOrders.length} pesanan di Sampah (maksimal 200).`:`Menampilkan ${orders.length} pesanan terbaru menurut waktu pemesanan.`}</span>{!showTrash&&ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
+      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Status penyerahan diubah oleh kasir dari halaman antrean. Halaman ini hanya untuk pemantauan distribusi.</p></div><div className="panel distribution-tools"><label>Dari tanggal pengiriman<input type="date" value={effectiveDistributionFrom} onChange={e=>setDistributionFrom(e.target.value)}/></label><label>Sampai tanggal pengiriman<input type="date" value={effectiveDistributionTo} min={effectiveDistributionFrom} onChange={e=>setDistributionTo(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button onClick={()=>loadDistributionOrders(effectiveDistributionFrom,effectiveDistributionTo)} disabled={invalidDistributionRange}>Muat ulang pesanan</button></div></div>{invalidDistributionRange&&<p className="notice">Tanggal mulai tidak boleh melewati tanggal akhir.</p>}{distributionLoading&&<p className="muted">Memuat pesanan pada rentang tanggal pengiriman...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada rentang tanggal</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada rentang {effectiveDistributionFrom} sampai {effectiveDistributionTo}. Ubah rentang tanggal atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].deliveryDate}-${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{new Date(`${group[0].deliveryDate}T00:00:00`).toLocaleDateString(`id-ID`,{day:`numeric`,month:`long`,year:`numeric`})} | {group[0].customer.gender} | {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className}  |  {o.items.reduce((n,i)=>n+i.qty,0)} item  |  {money(o.total)}</p><p className="fine-print">Dipesan: {new Date(o.createdAt).toLocaleString(`id-ID`)} | Pengiriman: {o.deliveryDate}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>x {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span></div></article>)}</div>)}</section>}
       {page==='admin'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Portal Super Admin</h1><p className="muted">Pemantauan gabungan antrean Putra dan Putri.</p></div><div className="stats"><div className="stat-card"><small>Pesanan terbaru dimuat</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Nilai pesanan terbaru dimuat</small><strong>{money(orders.reduce((s,o)=>s+o.total,0))}</strong></div><div className="stat-card"><small>Belum selesai (pesanan dimuat)</small><strong>{orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length}</strong></div></div><div className="split-stats"><div className="panel"><span className="category-label">SANTRI PUTRA</span><h2>{orders.filter(o=>o.customer.gender==='Putra').length}</h2><p className="muted">Pesanan masuk</p></div><div className="panel"><span className="category-label">SANTRI PUTRI</span><h2>{orders.filter(o=>o.customer.gender==='Putri').length}</h2><p className="muted">Pesanan masuk</p></div></div><div className="panel settings-panel"><h2>Laporan dan ekspor Excel</h2><p className="muted">Pilih rentang tanggal pengiriman, lihat transaksi yang masuk dalam periode tersebut, lalu unduh laporan Excel dengan satu baris untuk setiap transaksi santri.</p><button className="primary" type="button" onClick={()=>setPage('reports')}>Buka Laporan -&gt;</button></div></section>}
       {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Excel, PDF ceklis distribusi, dan TXT rekap menu mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button><button type="button" onClick={exportPdfChecklist} disabled={reportLoading||!reportLoaded||reportLimitReached}>Ekspor PDF (ceklis)</button><button type="button" onClick={exportTxtSummary} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh TXT</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'}  |  {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor}/>}</section>}
       {page==='catalog'&&isAdmin&&<section>
@@ -1180,19 +1258,27 @@ function AuthScreen({onClose}) {
   async function submit(e){e.preventDefault();setBusy(true);setMessage('');if(!supabase){setMessage('Supabase belum dikonfigurasi.');setBusy(false);return;}const {error}=await supabase.auth.signInWithPassword({email:email.trim(),password});if(error)setMessage(error.message);else onClose?.();setBusy(false);}
   return <div className="auth-screen"><form className="auth-card" onSubmit={submit}><button className="auth-close" type="button" onClick={onClose}>&lt;- Kembali ke katalog</button><div className="brand-mark">WD</div><p className="eyebrow">AREA KHUSUS PETUGAS</p><h1>Login kasir & admin</h1><p className="auth-description">Pelanggan tidak perlu login. Halaman ini hanya untuk petugas.</p><label>Email<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>{message&&<div className="auth-message" role="status">{message}</div>}<button className="primary full" type="submit" disabled={busy}>{busy?'Memproses...':'Masuk'}</button></form></div>;
 }
-function OrderList({orders,onStatus,onEdit}) {
-  if(!orders.length)return <div className="panel empty">Belum ada pesanan di database.</div>;
+function OrderList({orders,onStatus,onEdit,onDelete,onRestore,trashMode=false}) {
+  if(!orders.length)return <div className="panel empty">{trashMode?'Sampah kosong. Pesanan yang dihapus akan muncul di sini.':'Belum ada pesanan di database.'}</div>;
   return <div className="order-list">{orders.map(o=>{
     const terminal = ['delivered','cancelled'].includes(o.status);
+    const deletedAt = o.deletedAt ? new Date(o.deletedAt) : null;
+    const restoreUntil = deletedAt ? new Date(deletedAt.getTime() + 3 * 24 * 60 * 60 * 1000) : null;
     return <article className="panel order-card" key={o.id}>
-      <div className="order-top"><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><small>{new Date(o.createdAt).toLocaleString('id-ID')}</small></div><span className={`status ${o.status==='delivered'?'paid':''}`}>{statusLabels[o.status]||o.status}</span></div>
-      <div className="order-meta"><span>{o.customer.gender}</span><span>{o.customer.dorm}</span><span>{o.customer.className}</span><span>Kirim: {o.deliveryDate}</span></div>
+      <div className="order-top"><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><small>Dipesan: {new Date(o.createdAt).toLocaleString('id-ID')}</small></div><span className={`status ${o.status==='delivered'?'paid':''}`}>{statusLabels[o.status]||o.status}</span></div>
+      <div className="order-meta"><span>{o.customer.gender}</span><span>{o.customer.dorm}</span><span>{o.customer.className}</span><span>Pengiriman: {o.deliveryDate}</span></div>
       {o.note&&<p className="fine-print">Catatan: {o.note}</p>}
       <div className="order-items">{o.items.map((x,i)=><div key={`${x.id}-${i}`}><span>{x.name} x {x.qty}</span><strong>{money(x.price*x.qty)}</strong></div>)}</div>
       <div className="order-bottom"><strong>{money(o.total)}</strong><div className="order-actions order-action-buttons">
-        <button type="button" className="primary" onClick={()=>onStatus(o.id,'delivered')} disabled={terminal}>Diserahkan</button>
-        <button type="button" onClick={()=>{if(window.confirm(`Batalkan pesanan ${o.number}?`)) onStatus(o.id,'cancelled');}} disabled={terminal}>Dibatalkan</button>
-        <button type="button" onClick={()=>onEdit?.(o)}>Edit</button>
+        {trashMode ? <>
+          <small className="trash-retention">Dihapus: {deletedAt?.toLocaleString('id-ID') || '-'}<br/>Batas pemulihan: {restoreUntil?.toLocaleString('id-ID') || '-'}</small>
+          <button type="button" className="restore" onClick={()=>{if(window.confirm(`Pulihkan pesanan ${o.number} ke antrean aktif?`)) onRestore?.(o.id);}}>Pulihkan</button>
+        </> : <>
+          <button type="button" className="primary" onClick={()=>onStatus(o.id,'delivered')} disabled={terminal}>Diserahkan</button>
+          <button type="button" onClick={()=>{if(window.confirm(`Batalkan pesanan ${o.number}?`)) onStatus(o.id,'cancelled');}} disabled={terminal}>Dibatalkan</button>
+          <button type="button" onClick={()=>onEdit?.(o)}>Edit</button>
+          <button type="button" className="danger" onClick={()=>{if(window.confirm(`Pindahkan pesanan ${o.number} ke Sampah? Pesanan dapat dipulihkan selama 3 hari, lalu dihapus permanen.`)) onDelete?.(o.id);}}>Hapus</button>
+        </>}
       </div></div>
     </article>;
   })}</div>;
