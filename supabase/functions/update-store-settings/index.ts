@@ -15,7 +15,7 @@ const deno = (globalThis as typeof globalThis & {
 }).Deno;
 
 const BUCKET = "store-assets";
-const LOGO_PATH = "branding/store-logo";
+const LOGO_PATH_PREFIX = "branding/store-logo";
 const MAX_LOGO_BYTES = 2 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const ALLOWED_SETTINGS = new Set([
@@ -28,6 +28,20 @@ function isValidImage(bytes: Uint8Array, contentType: string): boolean {
   if (contentType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   if (contentType === "image/webp") return bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP";
   return false;
+}
+
+function getLogoStoragePath(publicUrl: unknown): string | null {
+  if (typeof publicUrl !== "string" || !publicUrl.trim()) return null;
+  try {
+    const parsed = new URL(publicUrl);
+    const marker = `/storage/v1/object/public/${BUCKET}/`;
+    const markerIndex = parsed.pathname.indexOf(marker);
+    if (markerIndex < 0) return null;
+    const path = decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+    return path.startsWith("branding/") ? path : null;
+  } catch {
+    return null;
+  }
 }
 
 deno.serve(async (req) => {
@@ -66,45 +80,58 @@ deno.serve(async (req) => {
 
   const updates: Record<string, unknown> = { ...body.settings };
   const storage = admin.storage.from(BUCKET);
+  const logoChangeRequested = Boolean(body.logo) || body.removeLogo === true;
+  let previousLogoPath: string | null = null;
+  let uploadedLogoPath: string | null = null;
 
-  // Removal is deliberately performed only after the database update succeeds.
-  // Storage and Postgres do not share a transaction, so this ordering prevents
-  // losing the old logo when saving the settings row fails.
-  let shouldRemoveLogoAfterDatabaseSave = false;
+  if (logoChangeRequested) {
+    const { data: currentSettings, error: currentSettingsError } = await admin.from("store_settings")
+      .select("brand_logo_url").eq("id", true).maybeSingle();
+    if (currentSettingsError || !currentSettings) {
+      return json({ error: "Could not read the current store settings. No logo changes were made." }, 500);
+    }
+    previousLogoPath = getLogoStoragePath(currentSettings.brand_logo_url);
+  }
 
   if (body.logo) {
     const contentType = body.logo.contentType || "";
     const encoded = body.logo.base64 || "";
     if (!ALLOWED_TYPES.has(contentType)) return json({ error: "Logo must be PNG, JPG, or WebP" }, 400);
     if (!encoded || encoded.length > Math.ceil(MAX_LOGO_BYTES * 4 / 3) + 8 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return json({ error: "Logo is empty or exceeds the 2 MB limit" }, 413);
+
     let bytes: Uint8Array;
     try { bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); } catch { return json({ error: "Logo data is invalid" }, 400); }
     if (bytes.byteLength > MAX_LOGO_BYTES) return json({ error: "Logo exceeds the 2 MB limit" }, 413);
     if (!isValidImage(bytes, contentType)) return json({ error: "The file content does not match its image type" }, 400);
-    const { error: uploadError } = await storage.upload(LOGO_PATH, bytes, { contentType, cacheControl: "3600", upsert: true });
+
+    const extension = contentType === "image/png" ? "png" : contentType === "image/jpeg" ? "jpg" : "webp";
+    uploadedLogoPath = `${LOGO_PATH_PREFIX}-${crypto.randomUUID()}.${extension}`;
+    const { error: uploadError } = await storage.upload(uploadedLogoPath, bytes, { contentType, cacheControl: "3600", upsert: false });
     if (uploadError) return json({ error: "Failed to upload the logo. Check the store-assets bucket migration." }, 500);
-    const { data: publicData } = storage.getPublicUrl(LOGO_PATH);
-    updates.brand_logo_url = `${publicData.publicUrl}?v=${Date.now()}`;
+
+    const { data: publicData } = storage.getPublicUrl(uploadedLogoPath);
+    updates.brand_logo_url = publicData.publicUrl;
   } else if (body.removeLogo === true) {
     updates.brand_logo_url = null;
-    shouldRemoveLogoAfterDatabaseSave = true;
   }
 
   const { data: savedSettings, error: updateError } = await admin.from("store_settings")
     .update(updates).eq("id", true).select("id").maybeSingle();
-  if (updateError) {
-    return json({ error: "Failed to save settings. The existing logo was kept." }, 500);
-  }
-  if (!savedSettings) {
-    return json({ error: "Store settings row was not updated. The existing logo was kept." }, 500);
+  if (updateError || !savedSettings) {
+    if (uploadedLogoPath) {
+      const { error: cleanupError } = await storage.remove([uploadedLogoPath]);
+      if (cleanupError) {
+        return json({ error: "Failed to save settings. The previous logo is still active, but temporary logo cleanup also failed." }, 500);
+      }
+    }
+    return json({ error: updateError ? "Failed to save settings. The previous logo was kept." : "Store settings row was not updated. The previous logo was kept." }, 500);
   }
 
-  if (shouldRemoveLogoAfterDatabaseSave) {
-    const { error: removeError } = await storage.remove([LOGO_PATH]);
+  // The database now points to the new URL (or null), so it is safe to remove the old file.
+  if (previousLogoPath && previousLogoPath !== uploadedLogoPath) {
+    const { error: removeError } = await storage.remove([previousLogoPath]);
     if (removeError) {
-      // The DB no longer points at the logo, but removal failed. Report this
-      // honestly so an operator can retry cleanup; do not report full success.
-      return json({ error: "Settings were saved, but the old logo file could not be removed. Please retry logo removal." }, 500);
+      return json({ error: "Settings were saved successfully, but the previous logo file could not be deleted. The new logo is active; ask an administrator to remove the unused old file from Storage." }, 500);
     }
   }
 
