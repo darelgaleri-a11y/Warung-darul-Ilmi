@@ -23,10 +23,10 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>\"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[char]));
 }
 function mapOrder(row) {
-  const items = (row.order_items || []).map(x => ({ id: x.product_id ?? x.id, name: x.product_name_snapshot, price: Number(x.unit_price_snapshot), qty: x.quantity }));
+  const items = (row.order_items || []).map(x => ({ id: x.product_id ?? x.id, productId: x.product_id ?? null, name: x.product_name_snapshot, price: Number(x.unit_price_snapshot), qty: x.quantity }));
   return { id: row.id, number: row.order_number, createdAt: row.created_at, deliveryDate: row.delivery_date,
     customer: { name: row.guest_name || row.profiles?.full_name || 'Pelanggan', gender: normalizeGender(row.guest_gender), dorm: row.guest_dormitory || '-', className: row.guest_class || '-', phone: row.guest_phone || '' },
-    note: row.customer_note || '', items, total: Number(row.total_amount || 0), status: row.status };
+    note: row.customer_note || '', items, total: Number(row.total_amount || 0), status: row.status, paymentState: row.payment_state };
 }
 function App() {
   const [page, setPage] = useState('order');
@@ -84,6 +84,11 @@ function App() {
   const [reportTo, setReportTo] = useState('');
   const [reportGender, setReportGender] = useState('Semua');
   const [cashierGenderFilter, setCashierGenderFilter] = useState('Semua');
+  const [editingOrder, setEditingOrder] = useState(null);
+  const [orderEditForm, setOrderEditForm] = useState(null);
+  const [orderEditProducts, setOrderEditProducts] = useState([]);
+  const [orderEditNewProduct, setOrderEditNewProduct] = useState('');
+  const [orderEditBusy, setOrderEditBusy] = useState(false);
   const ordersLoadInFlightRef = useRef(false);
   const ordersRefreshQueuedRef = useRef(false);
   const distributionLoadVersionRef = useRef(0);
@@ -592,15 +597,128 @@ function App() {
       setOrderSubmitting(false);
     }
   }
+  async function openOrderEditor(order) {
+    if (!isStaff || !order) return;
+    if (profile?.role === 'cashier' && normalizeGender(order.customer.gender) !== normalizeGender(profile.cashier_gender)) {
+      setNotice('Akun kasir tidak memiliki izin untuk mengubah pesanan dari jalur lain.');
+      return;
+    }
+    setOrderEditBusy(true);
+    try {
+      const { data, error } = await supabase
+        .from('products')
+        .select('id,name,price,is_available')
+        .eq('is_available', true)
+        .order('name');
+      if (error) throw error;
+      setOrderEditProducts(data || []);
+      setOrderEditForm({
+        name: order.customer.name || '',
+        gender: order.customer.gender || 'Putra',
+        dorm: order.customer.dorm === '-' ? '' : (order.customer.dorm || ''),
+        className: order.customer.className === '-' ? '' : (order.customer.className || ''),
+        phone: order.customer.phone || '',
+        note: order.note || '',
+        deliveryDate: order.deliveryDate || '',
+        items: order.items.map(item => ({ product_id: item.productId, name: item.name, price: Number(item.price || 0), quantity: Number(item.qty || 1) }))
+      });
+      setOrderEditNewProduct('');
+      setEditingOrder(order);
+    } catch (error) {
+      setNotice(`Editor pesanan gagal dibuka: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setOrderEditBusy(false);
+    }
+  }
+
+  function addOrderEditProduct() {
+    const product = orderEditProducts.find(item => String(item.id) === String(orderEditNewProduct));
+    if (!product || !orderEditForm) return;
+    setOrderEditForm(current => {
+      const existing = current.items.find(item => String(item.product_id) === String(product.id));
+      return {
+        ...current,
+        items: existing
+          ? current.items.map(item => String(item.product_id) === String(product.id) ? { ...item, quantity: Math.min(50, Number(item.quantity || 0) + 1) } : item)
+          : [...current.items, { product_id: product.id, name: product.name, price: Number(product.price || 0), quantity: 1 }]
+      };
+    });
+    setOrderEditNewProduct('');
+  }
+
+  function updateOrderEditQuantity(index, value) {
+    const quantity = Math.max(1, Math.min(50, Number.parseInt(value, 10) || 1));
+    setOrderEditForm(current => ({ ...current, items: current.items.map((item, itemIndex) => itemIndex === index ? { ...item, quantity } : item) }));
+  }
+
+  function removeOrderEditItem(index) {
+    setOrderEditForm(current => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }));
+  }
+
+  async function saveOrderEdit(event) {
+    event.preventDefault();
+    if (!editingOrder || !orderEditForm || orderEditBusy) return;
+    if (orderEditForm.name.trim().length < 2 || !orderEditForm.dorm.trim() || !orderEditForm.className.trim() || !orderEditForm.deliveryDate) {
+      setNotice('Nama santri, asrama, kelas, dan tanggal pengiriman wajib diisi.');
+      return;
+    }
+    if (!['Putra', 'Putri'].includes(orderEditForm.gender)) {
+      setNotice('Kategori santri harus Putra atau Putri.');
+      return;
+    }
+    if (!orderEditForm.items.length || orderEditForm.items.length > 30) {
+      setNotice('Pesanan harus memiliki 1 sampai 30 jenis menu.');
+      return;
+    }
+    const productIds = new Set(orderEditProducts.map(product => String(product.id)));
+    const items = orderEditForm.items.map(item => ({ product_id: item.product_id, quantity: Number(item.quantity) }));
+    if (items.some(item => !item.product_id || !productIds.has(String(item.product_id)) || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 50)) {
+      setNotice('Ada menu lama yang sudah tidak tersedia. Hapus menu tersebut atau ganti dengan menu aktif sebelum menyimpan.');
+      return;
+    }
+    const requestedTotal = items.reduce((sum, item) => {
+      const product = orderEditProducts.find(row => String(row.id) === String(item.product_id));
+      return sum + Number(product?.price || 0) * item.quantity;
+    }, 0);
+    if (['paid', 'pending_verification'].includes(editingOrder.paymentState) && requestedTotal !== Number(editingOrder.total || 0)) {
+      setNotice('Pesanan memiliki pembayaran menunggu verifikasi atau sudah lunas. Perubahan menu/jumlah tidak boleh mengubah total tagihan.');
+      return;
+    }
+
+    setOrderEditBusy(true);
+    try {
+      const { data, error } = await supabase.rpc('update_staff_order', {
+        p_order_id: editingOrder.id,
+        p_guest_name: orderEditForm.name.trim(),
+        p_guest_gender: orderEditForm.gender,
+        p_guest_dormitory: orderEditForm.dorm.trim(),
+        p_guest_class: orderEditForm.className.trim(),
+        p_guest_phone: orderEditForm.phone.trim() || null,
+        p_customer_note: orderEditForm.note.trim() || null,
+        p_delivery_date: orderEditForm.deliveryDate,
+        p_items: items
+      });
+      if (error) throw error;
+      const result = Array.isArray(data) ? data[0] : data;
+      const orderNumber = editingOrder.number;
+      setEditingOrder(null);
+      setOrderEditForm(null);
+      setNotice(`Pesanan ${orderNumber} berhasil diperbarui. Total: ${money(result?.total_amount ?? requestedTotal)}.`);
+      await loadOrders();
+      if (page === 'reports' && reportLoaded) await loadReportOrders();
+      if (page === 'distribution') await loadDistributionOrders(effectiveDistributionDate);
+    } catch (error) {
+      setNotice(`Pesanan gagal diperbarui: ${error?.message || 'Kesalahan jaringan.'}`);
+    } finally {
+      setOrderEditBusy(false);
+    }
+  }
   async function updateOrder(id,patch) {
     if (!supabase) return;
     const target = orders.find(o => o.id === id) || reportOrders.find(o => o.id === id) || distributionRows.find(o => o.id === id);
     if (!target) { setNotice('Pesanan tidak ditemukan pada antrean yang sedang dibuka. Muat ulang data.'); return; }
     if (profile?.role === 'cashier' && target.customer.gender !== normalizeGender(profile.cashier_gender)) {
       setNotice('Akun kasir tidak memiliki izin untuk mengubah pesanan dari jalur lain.'); return;
-    }
-    if (patch.status === 'delivered' && target.status !== 'ready') {
-      setNotice('Pesanan hanya dapat ditandai diserahkan setelah berstatus Siap diserahkan.'); return;
     }
 
     try {
@@ -854,7 +972,7 @@ function App() {
       }
       const productNames = [...productNameMap.values()].sort((a, b) => a.localeCompare(b, 'id'));
       const productKey = name => String(name || '').trim().toLocaleLowerCase('id');
-      const matrixHeaders = ['Nama Santri', 'Kelas', 'Asrama', 'Kategori', 'Tanggal Pengiriman', 'Nomor Pesanan', ...productNames, 'Total Pesanan', 'Status Pesanan'];
+      const matrixHeaders = ['Nama Santri', 'Kelas', 'Asrama', ...productNames];
       const matrixRows = [matrixHeaders];
       for (const order of reportOrders) {
         const quantities = new Map();
@@ -864,9 +982,7 @@ function App() {
         }
         matrixRows.push([
           order.customer.name || '', order.customer.className || '', order.customer.dorm || '',
-          order.customer.gender || '', order.deliveryDate || '', order.number || '',
-          ...productNames.map(name => quantities.get(productKey(name)) || 0),
-          Number(order.total || 0), statusLabels[order.status] || order.status || ''
+          ...productNames.map(name => quantities.get(productKey(name)) || 0)
         ]);
       }
       // Dua sheet berikut tetap memakai data transaksi yang sama dengan filter tanggal.
@@ -884,22 +1000,96 @@ function App() {
       setNotice(`Laporan berhasil dibuat: ${reportOrders.length} transaksi. Kolom produk: ${productNames.length}. File: ${fileName}.`);
     } catch (error) { setNotice(`Ekspor Excel gagal: ${error?.message || error}`); }
   }
-  function printKitchenTickets(list = distributionOrders) {
-    if (!list.length) { setNotice('Tidak ada pesanan pada tanggal dan filter tersebut.'); return; }
-    const html = list.map(o => `<article class="ticket"><header><b>WARUNG DARUL ILMI</b><strong>${escapeHtml(o.number)}</strong></header><h2>${escapeHtml(o.customer.name)}</h2><p>${escapeHtml(o.customer.gender)}  |  ${escapeHtml(o.customer.dorm)}  |  ${escapeHtml(o.customer.className)}</p><p><b>Tanggal distribusi:</b> ${escapeHtml(o.deliveryDate)}</p><hr>${o.items.map(i=>`<div class="item"><span>${escapeHtml(i.name)}</span><b>x ${Number(i.qty)}</b></div>`).join('')}<hr><p><b>Catatan:</b> ${escapeHtml(o.note || '-')}</p><footer>Periksa jumlah dan identitas sebelum diserahkan.</footer></article>`).join('');
-    const printDocument = `<!doctype html><html><head><meta charset="utf-8"><title>Tiket Dapur</title><style>body{font:14px Arial,sans-serif;color:#111}.ticket{border:1px dashed #555;padding:18px;margin:0 auto 18px;max-width:420px;page-break-inside:avoid}.ticket header,.item{display:flex;justify-content:space-between;gap:15px}.ticket h2{margin:14px 0 4px}.ticket p{margin:6px 0}.ticket footer{margin-top:16px;font-size:11px}@media print{.ticket{page-break-after:always;margin:0 auto;border:1px dashed #555}}</style></head><body>${html}</body></html>`;
+  function reportPeriodLabel() {
+    const formatDate = value => value ? new Intl.DateTimeFormat('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${value}T00:00:00`)) : '';
+    if (reportFrom && reportTo && reportFrom !== reportTo) return `${formatDate(reportFrom)} s.d. ${formatDate(reportTo)}`;
+    return formatDate(reportFrom || reportTo) || 'Periode laporan';
+  }
+
+  function exportPdfChecklist() {
+    if (!isAdmin || !reportLoaded || reportLoading || reportLimitReached || !reportOrders.length) {
+      setNotice('Muat laporan yang lengkap terlebih dahulu sebelum membuat PDF.');
+      return;
+    }
+    const rows = ['Putra', 'Putri'].map(gender => {
+      const ordersForGender = reportOrders.filter(order => order.customer.gender === gender);
+      if (!ordersForGender.length) return '';
+      const body = ordersForGender.map(order => {
+        const menu = order.items.map(item => `${escapeHtml(item.name)} x ${Number(item.qty)}`).join('<br>');
+        return `<tr><td>${escapeHtml(order.customer.name)}</td><td>${escapeHtml(order.customer.className)}</td><td>${escapeHtml(order.customer.dorm)}</td><td>${menu}</td><td class="check-cell"><span class="check-box"></span></td></tr>`;
+      }).join('');
+      return `<section class="gender-section"><h2>Santri ${gender}</h2><table><thead><tr><th>Nama santri</th><th>Kelas</th><th>Asrama</th><th>Menu dan jumlah</th><th>Ceklis</th></tr></thead><tbody>${body}</tbody></table></section>`;
+    }).join('');
+    const html = `<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Ceklis Distribusi Warung Darul Ilmi</title><style>
+      *{box-sizing:border-box}body{font:12px Arial,sans-serif;color:#17251e;margin:24px}h1{font-size:20px;margin:0 0 5px}p{margin:0 0 18px;color:#59685f}.gender-section{margin:22px 0 28px}.gender-section h2{font-size:15px;background:#edf2ed;padding:8px;margin:0 0 8px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{border:1px solid #aeb9b0;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#f4f5f2}th:nth-child(1){width:23%}th:nth-child(2){width:12%}th:nth-child(3){width:16%}th:nth-child(4){width:39%}th:nth-child(5){width:10%}.check-cell{text-align:center}.check-box{display:inline-block;width:17px;height:17px;border:1.5px solid #26382d;margin:2px}.empty{padding:12px;border:1px solid #aaa}@media print{body{margin:12mm}.gender-section{break-inside:avoid}tr{break-inside:avoid}h1{font-size:18px}}
+    </style></head><body><h1>Warung Darul Ilmi â€” Ceklis Distribusi</h1><p>Periode: ${escapeHtml(reportPeriodLabel())} | Jumlah pesanan: ${reportOrders.length}</p>${rows || '<p class="empty">Tidak ada pesanan.</p>'}</body></html>`;
     const frame = document.createElement('iframe');
     frame.setAttribute('aria-hidden', 'true');
     frame.style.position = 'fixed'; frame.style.width = '1px'; frame.style.height = '1px'; frame.style.opacity = '0'; frame.style.border = '0';
     frame.onload = () => {
       try { frame.contentWindow.focus(); frame.contentWindow.print(); }
-      catch { setNotice('Browser tidak mengizinkan proses cetak. Coba gunakan Chrome atau Edge terbaru.'); }
+      catch { setNotice('Dialog cetak tidak dapat dibuka. Coba gunakan Chrome atau Edge terbaru.'); }
       frame.contentWindow.addEventListener('afterprint', () => frame.remove(), { once: true });
     };
-    frame.srcdoc = printDocument;
+    frame.srcdoc = html;
     document.body.appendChild(frame);
+    setNotice('Dialog cetak dibuka. Pilih â€œSimpan sebagai PDFâ€ pada tujuan printer untuk mengunduh PDF.');
   }
 
+  async function exportTxtSummary() {
+    if (!isAdmin || !reportLoaded || reportLoading || reportLimitReached || !reportOrders.length) {
+      setNotice('Muat laporan yang lengkap terlebih dahulu sebelum membuat TXT.');
+      return;
+    }
+    try {
+      const { data: catalogProducts, error } = await supabase
+        .from('products').select('id,name,categories(name)').order('name');
+      if (error) throw error;
+      const categoryById = new Map();
+      const categoryByName = new Map();
+      for (const product of catalogProducts || []) {
+        const category = String(product.categories?.name || 'Tanpa kategori').trim();
+        if (product.id !== undefined && product.id !== null) categoryById.set(String(product.id), category);
+        if (product.name) categoryByName.set(String(product.name).trim().toLocaleLowerCase('id'), category);
+      }
+      const totals = { Putra: new Map(), Putri: new Map() };
+      for (const order of reportOrders) {
+        const gender = order.customer.gender === 'Putri' ? 'Putri' : 'Putra';
+        for (const item of order.items) {
+          const category = (item.productId !== null && item.productId !== undefined ? categoryById.get(String(item.productId)) : null)
+            || categoryByName.get(String(item.name || '').trim().toLocaleLowerCase('id'))
+            || 'Tanpa kategori';
+          const key = `${category}\u0000${item.name}`;
+          const current = totals[gender].get(key) || { category, name: item.name, quantity: 0 };
+          current.quantity += Number(item.qty || 0);
+          totals[gender].set(key, current);
+        }
+      }
+      const lines = [`PESANAN ${reportPeriodLabel().toLocaleUpperCase('id-ID')}`, 'WARUNG DARUL ILMI', ''];
+      for (const gender of ['Putra', 'Putri']) {
+        lines.push(`SANTRI ${gender.toUpperCase()}`);
+        const entries = [...totals[gender].values()];
+        if (!entries.length) { lines.push('  - Tidak ada pesanan', ''); continue; }
+        const categories = [...new Set(entries.map(entry => entry.category))].sort((a, b) => a.localeCompare(b, 'id'));
+        for (const category of categories) {
+          lines.push(`  ${category.toUpperCase()}`);
+          entries.filter(entry => entry.category === category).sort((a, b) => a.name.localeCompare(b.name, 'id'))
+            .forEach(entry => lines.push(`    - ${entry.name}: ${entry.quantity}`));
+        }
+        lines.push('');
+      }
+      lines.push(`Jumlah pesanan: ${reportOrders.length}`);
+      const blob = new Blob([String.fromCharCode(0xFEFF) + lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `pesanan-warung-darul-ilmi-${reportFrom || reportTo || 'periode'}-${reportTo || reportFrom || ''}.txt`;
+      document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+      setNotice('Rekap TXT berhasil diunduh, dipisahkan berdasarkan Putra/Putri dan kategori menu.');
+    } catch (error) {
+      setNotice(`Ekspor TXT gagal: ${error?.message || error}`);
+    }
+  }
   if (staffLoginOpen) return <AuthScreen onClose={()=>setStaffLoginOpen(false)} />;
   return <div className="app-shell">
     <header className="topbar"><button className="brand" onClick={()=>setPage('order')} aria-label="Ke halaman pemesanan">{storeSettings.brand_logo_url ? <img className="brand-logo-image" src={storeSettings.brand_logo_url} alt="Logo toko" /> : <span className="brand-mark">WD</span>}<span><strong>{storeSettings.store_name || 'Warung Darul Ilmi'}</strong><small>Pesan mudah, berkah insyaallah</small></span></button><nav className="nav"><button className={page==='order'?'active':''} onClick={()=>setPage('order')}>Pemesanan</button>{isStaff&&<><button className={page==='cashier'?'active':''} onClick={()=>setPage('cashier')}>Kasir</button><button className={page==='distribution'?'active':''} onClick={()=>setPage('distribution')}>Distribusi & Dapur</button></>}{isAdmin&&<><button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}>Super Admin</button><button className={page==='reports'?'active':''} onClick={()=>setPage('reports')}>Laporan</button><button className={page==='catalog'?'active':''} onClick={()=>setPage('catalog')}>Kelola Katalog</button><button className={page==='settings'?'active':''} onClick={()=>setPage('settings')}>Pengaturan</button></>}{session&&profile&&<span className="account-chip">{profile.full_name||session.user.email}  |  {profile.role}</span>}{session?<button onClick={async()=>{await supabase.auth.signOut();setProfile(null);setPage('order');}}>Keluar</button>:<button onClick={()=>setStaffLoginOpen(true)}>Login Staf</button>}</nav>
@@ -921,10 +1111,10 @@ function App() {
         {cartCount>0&&<div className="mobile-cart-dock"><button type="button" className="mobile-cart-summary" onClick={()=>setCartOpen(true)} aria-expanded={cartOpen} aria-controls="mobile-cart-sheet"><span className="mobile-cart-icon">{String.fromCodePoint(0x1F6D2)} <b>{cartCount}</b></span><span className="mobile-cart-label"><strong>Lihat keranjang</strong><small>{cartCount} item dipilih</small></span><strong className="mobile-cart-total">{money(cartTotal)}</strong><span className="mobile-cart-chevron">^</span></button></div>}
         {cartOpen&&cartCount>0&&<div className="mobile-cart-layer" onClick={()=>setCartOpen(false)}><section id="mobile-cart-sheet" className="mobile-cart-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-cart-title" onClick={e=>e.stopPropagation()}><div className="mobile-cart-sheet-head"><div><p className="eyebrow">LANGKAH 03</p><h2 id="mobile-cart-title">Keranjang pesanan</h2></div><button type="button" className="mobile-cart-close" onClick={()=>setCartOpen(false)} aria-label="Tutup keranjang">x</button></div><div className="mobile-cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div><strong>{item.name}</strong><small>{money(item.price)} / item</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)} aria-label={`Kurangi ${item.name}`}>-</button><b>{item.qty}</b><button onClick={()=>changeQty(item.id,1)} aria-label={`Tambah ${item.name}`}>+</button></div><strong>{money(item.price*item.qty)}</strong></div>)}</div><label>Catatan untuk dapur/kasir<textarea value={identity.note} onChange={e=>setIdentity({...identity,note:e.target.value})} placeholder="Contoh: sambal dipisah, tanpa sendok plastik"/></label><div className="cart-total"><span>Total pesanan</span><strong>{money(cartTotal)}</strong></div><button className="primary full" onClick={placeOrder} disabled={orderSubmitting}>{orderSubmitting?'Menyimpan pesanan...':'Simpan pesanan & lanjut WhatsApp'} <span>{'→'}</span></button><p className="fine-print">Pesanan disimpan ke Supabase terlebih dahulu. Pembayaran diverifikasi petugas sebelum barang diserahkan.</p></section></div>}
       </section>}
-      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama..."/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesanan...</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/><div className="toolbar"><span className="muted">Menampilkan {orders.length} pesanan terbaru yang sudah dimuat.</span>{ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
-      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Hanya pesanan berstatus siap diserahkan yang dapat ditandai sudah diserahkan.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button className="primary" onClick={()=>printKitchenTickets()}>Cetak semua tiket dapur</button><button onClick={loadOrders}>Muat ulang pesanan</button></div></div>{distributionLoading&&<p className="muted">Memuat semua pesanan pada tanggal distribusi...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada tanggal ini</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender}  |  {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className}  |  {o.items.reduce((n,i)=>n+i.qty,0)} item  |  {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>x {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span><button onClick={()=>printKitchenTickets([o])}>Cetak tiket</button><button className="primary" onClick={()=>updateOrder(o.id,{status:'delivered'})} disabled={o.status!=='ready'}>Tandai diserahkan</button></div></article>)}</div>)}</section>}
+      {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div><div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div><div className="toolbar"><h2>Antrean pesanan</h2><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama..."/><label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label><select aria-label="Filter status pesanan" value={filter} onChange={e=>setFilter(e.target.value)}><option>Semua</option><option>Menunggu</option><option>Dikonfirmasi</option><option>Diproses</option><option>Siap diserahkan</option><option>Sudah diserahkan</option><option>Dibatalkan</option></select><button onClick={loadOrders}>Muat ulang</button></div>{loadingOrders&&<p className="muted">Memuat pesanan...</p>}<OrderList orders={filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor}/><div className="toolbar"><span className="muted">Menampilkan {orders.length} pesanan terbaru yang sudah dimuat.</span>{ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
+      {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Status penyerahan diubah oleh kasir dari halaman antrean. Halaman ini hanya untuk pemantauan distribusi.</p></div><div className="panel distribution-tools"><label>Tanggal pengiriman<input type="date" value={effectiveDistributionDate} onChange={e=>setDistributionDate(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button onClick={()=>loadDistributionOrders(effectiveDistributionDate)}>Muat ulang pesanan</button></div></div>{distributionLoading&&<p className="muted">Memuat semua pesanan pada tanggal distribusi...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada tanggal ini</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada {effectiveDistributionDate}. Pilih tanggal lain atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{group[0].customer.gender}  |  {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className}  |  {o.items.reduce((n,i)=>n+i.qty,0)} item  |  {money(o.total)}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>x {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span></div></article>)}</div>)}</section>}
       {page==='admin'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Portal Super Admin</h1><p className="muted">Pemantauan gabungan antrean Putra dan Putri.</p></div><div className="stats"><div className="stat-card"><small>Pesanan terbaru dimuat</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Nilai pesanan terbaru dimuat</small><strong>{money(orders.reduce((s,o)=>s+o.total,0))}</strong></div><div className="stat-card"><small>Belum selesai (pesanan dimuat)</small><strong>{orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length}</strong></div></div><div className="split-stats"><div className="panel"><span className="category-label">SANTRI PUTRA</span><h2>{orders.filter(o=>o.customer.gender==='Putra').length}</h2><p className="muted">Pesanan masuk</p></div><div className="panel"><span className="category-label">SANTRI PUTRI</span><h2>{orders.filter(o=>o.customer.gender==='Putri').length}</h2><p className="muted">Pesanan masuk</p></div></div><div className="panel settings-panel"><h2>Laporan dan ekspor Excel</h2><p className="muted">Pilih rentang tanggal pengiriman, lihat transaksi yang masuk dalam periode tersebut, lalu unduh laporan Excel dengan satu baris untuk setiap transaksi santri.</p><button className="primary" type="button" onClick={()=>setPage('reports')}>Buka Laporan -&gt;</button></div></section>}
-      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Pratinjau serta seluruh lembar Excel mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'}  |  {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})}/>}</section>}
+      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Excel, PDF ceklis distribusi, dan TXT rekap menu mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button><button type="button" onClick={exportPdfChecklist} disabled={reportLoading||!reportLoaded||reportLimitReached}>Ekspor PDF (ceklis)</button><button type="button" onClick={exportTxtSummary} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh TXT</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'}  |  {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor}/>}</section>}
       {page==='catalog'&&isAdmin&&<section>
         <div className="page-intro"><p className="eyebrow">MANAJEMEN MENU</p><h1>Kelola katalog</h1><p className="muted">Tambah dan ubah produk, harga, kategori, serta ketersediaan yang tampil di halaman pelanggan.</p></div>
         <form className="panel settings-panel catalog-form" onSubmit={saveProduct}>
@@ -954,7 +1144,35 @@ function App() {
             {!brandLogoFile && !storeSettings.brand_logo_url && !removeBrandLogo && <p className="muted">Belum ada logo khusus. Logo bawaan akan ditampilkan.</p>}
             {removeBrandLogo && <p className="muted">Logo khusus akan dihapus setelah pengaturan disimpan.</p>}
           </div><label>WhatsApp Kasir Putra<input inputMode="numeric" value={storeSettings.whatsapp_number_putra||''} onChange={e=>setStoreSettings({...storeSettings,whatsapp_number_putra:e.target.value})} placeholder="628xxxxxxxxxx"/></label><label>WhatsApp Kasir Putri<input inputMode="numeric" value={storeSettings.whatsapp_number_putri||''} onChange={e=>setStoreSettings({...storeSettings,whatsapp_number_putri:e.target.value})} placeholder="628xxxxxxxxxx"/></label><label>WhatsApp Admin Umum (cadangan)<input inputMode="numeric" value={storeSettings.whatsapp_number||''} onChange={e=>setStoreSettings({...storeSettings,whatsapp_number:e.target.value})} placeholder="628xxxxxxxxxx"/></label><label>Nama bank<input value={storeSettings.bank_name||''} onChange={e=>setStoreSettings({...storeSettings,bank_name:e.target.value})} placeholder="Nama bank"/></label><label>Nomor rekening<input inputMode="numeric" value={storeSettings.bank_account_number||''} onChange={e=>setStoreSettings({...storeSettings,bank_account_number:e.target.value})} placeholder="Nomor rekening"/></label><label>Atas nama<input value={storeSettings.bank_account_name||''} onChange={e=>setStoreSettings({...storeSettings,bank_account_name:e.target.value})} placeholder="Nama pemilik rekening"/></label><label>Instruksi pembayaran<textarea value={storeSettings.payment_instructions||''} onChange={e=>setStoreSettings({...storeSettings,payment_instructions:e.target.value})} placeholder="Cantumkan nominal dan nomor pesanan pada berita transfer."/></label><div className="password-confirm-panel"><label>Password<input type="password" name="settings-password-confirmation-entry" autoComplete="new-password" readOnly onFocus={e=>e.currentTarget.removeAttribute("readonly")} value={settingsPassword} onChange={e=>setSettingsPassword(e.target.value)} required/></label></div><p className="fine-print">Nomor WhatsApp menggunakan kode negara 62 tanpa tanda + atau spasi. Pesanan Putra diarahkan ke Kasir Putra, sedangkan pesanan Putri ke Kasir Putri. Nomor Admin Umum dipakai sebagai cadangan jika nomor kasir terkait belum diisi.</p><button className="primary" disabled={settingsBusy}>{settingsBusy?'Memverifikasi & menyimpan...':'Verifikasi password & simpan pengaturan'}</button></form><div className="panel settings-panel"><h2>Jadwal pengiriman mingguan</h2><p className="muted">Pelanggan akan mendapat tanggal pengiriman aktif terdekat secara otomatis.</p><div className="chips">{['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'].map((day,weekday)=>{const active=deliveryWeekdays.find(x=>x.weekday===weekday)?.is_active||false;return <button type="button" key={day} className={active?'selected':''} onClick={()=>setDeliveryWeekdays(old=>[...old.filter(x=>x.weekday!==weekday),{weekday,is_active:!active}])}>{day} {active?String.fromCharCode(0x2713):'+'}</button>;})}</div><p className="fine-print">Tanggal pengiriman berikutnya: {nextDeliveryDate||'Belum tersedia - aktifkan minimal satu hari.'}</p><button className="primary" type="button" onClick={saveDeliverySchedule} disabled={scheduleBusy}>{scheduleBusy?'Menyimpan...':'Simpan jadwal mingguan'}</button></div><div className="panel settings-panel"><h2>Pengecualian tanggal pengiriman</h2><p className="muted">Tambahkan tanggal libur (tidak ada pengiriman) atau tanggal pengiriman khusus. Aturan tanggal khusus mengesampingkan jadwal mingguan.</p><form className="category-add" onSubmit={saveDateOverride}><label>Tanggal<input type="date" value={overrideDate} min={new Date().toISOString().slice(0,10)} onChange={e=>setOverrideDate(e.target.value)} required/></label><label>Jenis tanggal<select value={overrideDelivery?'delivery':'closed'} onChange={e=>setOverrideDelivery(e.target.value==='delivery')}><option value="closed">Libur / tidak ada pengiriman</option><option value="delivery">Pengiriman khusus</option></select></label><label>Catatan (opsional)<input value={overrideNote} onChange={e=>setOverrideNote(e.target.value)} placeholder="Contoh: Libur pondok / pengganti jadwal"/></label><button className="primary" disabled={overrideBusy}>{overrideBusy?'Menyimpan...':'Simpan tanggal khusus'}</button></form><div className="category-admin-list">{dateOverrides.length===0?<p className="muted">Belum ada tanggal khusus.</p>:dateOverrides.map(row=><div className="category-admin-row" key={row.delivery_date}><div><strong>{new Date(`${row.delivery_date}T00:00:00`).toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}</strong><small>{row.is_delivery_day?'Pengiriman khusus':'Libur pengiriman'}{row.note?`  |  ${row.note}`:''}</small></div><button type="button" onClick={()=>deleteDateOverride(row.delivery_date)}>Hapus</button></div>)}</div><button type="button" onClick={loadDateOverrides}>Muat ulang tanggal</button></div><div className="panel settings-panel"><h2>Pembagian akun kasir</h2><p className="muted">Atur jalur setiap akun kasir di sini. Kasir Putra hanya boleh menerima pesanan Putra; Kasir Putri hanya boleh menerima pesanan Putri.</p><button type="button" onClick={loadCashierAccounts} disabled={cashierAccountsBusy}>{cashierAccountsBusy?'Memuat...':'Muat ulang akun kasir'}</button>{cashierAccounts.length===0?<p className="fine-print">Belum ada akun dengan role cashier. Pastikan role akun sudah diatur di Supabase.</p>:cashierAccounts.map(account=><div className="category-admin-row" key={account.id}><div><strong>{account.full_name||'Kasir tanpa nama'}</strong><small>{account.id}</small></div><select aria-label={`Jalur ${account.full_name||account.id}`} value={normalizeGender(account.cashier_gender)} onChange={e=>saveCashierGender(account.id,e.target.value)}><option value="">Pilih jalur</option><option value="Putra">Kasir Putra</option><option value="Putri">Kasir Putri</option></select></div>)}</div></section>}
-    </main><footer><span className="footer-mark">WD</span><div><strong>Warung Darul Ilmi</strong><small>v1.2.6  |  Perbaikan foto katalog</small></div></footer>
+    {editingOrder && orderEditForm && <div className="order-edit-overlay" onClick={() => !orderEditBusy && (setEditingOrder(null), setOrderEditForm(null))}>
+      <section className="order-edit-modal" role="dialog" aria-modal="true" aria-labelledby="order-edit-title" onClick={event => event.stopPropagation()}>
+        <div className="section-heading"><div><p className="eyebrow">UBAH PESANAN</p><h2 id="order-edit-title">{editingOrder.number}</h2><p className="muted">Perubahan akan disimpan ke database.</p></div><button type="button" onClick={() => { setEditingOrder(null); setOrderEditForm(null); }} disabled={orderEditBusy}>Tutup</button></div>
+        {['paid', 'pending_verification'].includes(editingOrder.paymentState) && <p className="warning">Pesanan memiliki pembayaran menunggu verifikasi atau sudah lunas. Identitas dan catatan tetap dapat diperbarui, tetapi total menu/jumlah harus tetap sama dengan tagihan.</p>}
+        <form onSubmit={saveOrderEdit} className="order-edit-form">
+          <div className="order-edit-grid">
+            <label>Nama santri<input value={orderEditForm.name} onChange={event => setOrderEditForm({ ...orderEditForm, name: event.target.value })} required /></label>
+            <label>Kategori santri<select value={orderEditForm.gender} onChange={event => setOrderEditForm({ ...orderEditForm, gender: event.target.value })} disabled={profile?.role === 'cashier'}><option value="Putra">Putra</option><option value="Putri">Putri</option></select></label>
+            <label>Asrama<input value={orderEditForm.dorm} onChange={event => setOrderEditForm({ ...orderEditForm, dorm: event.target.value })} required /></label>
+            <label>Kelas<input value={orderEditForm.className} onChange={event => setOrderEditForm({ ...orderEditForm, className: event.target.value })} required /></label>
+            <label>Nomor WhatsApp<input value={orderEditForm.phone} onChange={event => setOrderEditForm({ ...orderEditForm, phone: event.target.value })} /></label>
+            <label>Tanggal pengiriman<input type="date" value={orderEditForm.deliveryDate} onChange={event => setOrderEditForm({ ...orderEditForm, deliveryDate: event.target.value })} required /></label>
+          </div>
+          <label>Catatan pesanan<textarea value={orderEditForm.note} onChange={event => setOrderEditForm({ ...orderEditForm, note: event.target.value })} rows="3" /></label>
+          <div className="order-edit-items"><h3>Menu pesanan</h3>
+            {orderEditForm.items.map((item, index) => {
+              const product = orderEditProducts.find(row => String(row.id) === String(item.product_id));
+              return <div className="order-edit-item" key={`${item.product_id || item.name}-${index}`}>
+                <div><strong>{product?.name || item.name}</strong><small>{product ? money(product.price) : 'Menu lama tidak tersedia; hapus atau ganti dengan menu aktif.'}</small></div>
+                <label>Jumlah<input type="number" min="1" max="50" value={item.quantity} onChange={event => updateOrderEditQuantity(index, event.target.value)} /></label>
+                <button type="button" onClick={() => removeOrderEditItem(index)} disabled={orderEditBusy}>Hapus</button>
+              </div>;
+            })}
+            <div className="order-edit-add"><label>Tambah menu aktif<select value={orderEditNewProduct} onChange={event => setOrderEditNewProduct(event.target.value)}><option value="">Pilih menu...</option>{orderEditProducts.map(product => <option key={product.id} value={product.id}>{product.name} â€” {money(product.price)}</option>)}</select></label><button type="button" onClick={addOrderEditProduct} disabled={!orderEditNewProduct || orderEditBusy}>Tambah menu</button></div>
+          </div>
+          <div className="order-edit-footer"><span>Perkiraan total: <strong>{money(orderEditForm.items.reduce((sum, item) => sum + Number(orderEditProducts.find(product => String(product.id) === String(item.product_id))?.price ?? item.price ?? 0) * Number(item.quantity || 0), 0))}</strong></span><button className="primary" type="submit" disabled={orderEditBusy}>{orderEditBusy ? 'Menyimpan...' : 'Simpan perubahan pesanan'}</button></div>
+        </form>
+      </section>
+    </div>}    </main><footer><span className="footer-mark">WD</span><div><strong>Warung Darul Ilmi</strong><small>v1.2.6  |  Perbaikan foto katalog</small></div></footer>
   </div>;
 }
 function AuthScreen({onClose}) {
@@ -962,12 +1180,21 @@ function AuthScreen({onClose}) {
   async function submit(e){e.preventDefault();setBusy(true);setMessage('');if(!supabase){setMessage('Supabase belum dikonfigurasi.');setBusy(false);return;}const {error}=await supabase.auth.signInWithPassword({email:email.trim(),password});if(error)setMessage(error.message);else onClose?.();setBusy(false);}
   return <div className="auth-screen"><form className="auth-card" onSubmit={submit}><button className="auth-close" type="button" onClick={onClose}>&lt;- Kembali ke katalog</button><div className="brand-mark">WD</div><p className="eyebrow">AREA KHUSUS PETUGAS</p><h1>Login kasir & admin</h1><p className="auth-description">Pelanggan tidak perlu login. Halaman ini hanya untuk petugas.</p><label>Email<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>{message&&<div className="auth-message" role="status">{message}</div>}<button className="primary full" type="submit" disabled={busy}>{busy?'Memproses...':'Masuk'}</button></form></div>;
 }
-function OrderList({orders,onStatus}) {
+function OrderList({orders,onStatus,onEdit}) {
   if(!orders.length)return <div className="panel empty">Belum ada pesanan di database.</div>;
-  const nextSteps = { pending:['confirmed','cancelled'], confirmed:['preparing','cancelled'], preparing:['ready','cancelled'], ready:['delivered','cancelled'], delivered:[], cancelled:[] };
   return <div className="order-list">{orders.map(o=>{
-    const options = [o.status, ...(nextSteps[o.status] || [])];
-    return <article className="panel order-card" key={o.id}><div className="order-top"><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><small>{new Date(o.createdAt).toLocaleString('id-ID')}</small></div><span className={`status ${o.status==='delivered'?'paid':''}`}>{statusLabels[o.status]||o.status}</span></div><div className="order-meta"><span>{o.customer.gender}</span><span>{o.customer.dorm}</span><span>{o.customer.className}</span><span>Kirim: {o.deliveryDate}</span></div>{o.note&&<p className="fine-print">Catatan: {o.note}</p>}<div className="order-items">{o.items.map((x,i)=><div key={`${x.id}-${i}`}><span>{x.name} x {x.qty}</span><strong>{money(x.price*x.qty)}</strong></div>)}</div><div className="order-bottom"><strong>{money(o.total)}</strong><div className="order-actions"><label>Status pesanan<select aria-label={`Status pesanan ${o.number}`} value={o.status} onChange={e=>onStatus(o.id,e.target.value)}>{options.map(v=><option key={v} value={v}>{statusLabels[v]}</option>)}</select></label></div></div></article>;
+    const terminal = ['delivered','cancelled'].includes(o.status);
+    return <article className="panel order-card" key={o.id}>
+      <div className="order-top"><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><small>{new Date(o.createdAt).toLocaleString('id-ID')}</small></div><span className={`status ${o.status==='delivered'?'paid':''}`}>{statusLabels[o.status]||o.status}</span></div>
+      <div className="order-meta"><span>{o.customer.gender}</span><span>{o.customer.dorm}</span><span>{o.customer.className}</span><span>Kirim: {o.deliveryDate}</span></div>
+      {o.note&&<p className="fine-print">Catatan: {o.note}</p>}
+      <div className="order-items">{o.items.map((x,i)=><div key={`${x.id}-${i}`}><span>{x.name} x {x.qty}</span><strong>{money(x.price*x.qty)}</strong></div>)}</div>
+      <div className="order-bottom"><strong>{money(o.total)}</strong><div className="order-actions order-action-buttons">
+        <button type="button" className="primary" onClick={()=>onStatus(o.id,'delivered')} disabled={terminal}>Diserahkan</button>
+        <button type="button" onClick={()=>{if(window.confirm(`Batalkan pesanan ${o.number}?`)) onStatus(o.id,'cancelled');}} disabled={terminal}>Dibatalkan</button>
+        <button type="button" onClick={()=>onEdit?.(o)}>Edit</button>
+      </div></div>
+    </article>;
   })}</div>;
 }
 export default App;
