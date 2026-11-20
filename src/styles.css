@@ -147,3 +147,11 @@ button:disabled{opacity:.6;cursor:wait}
 .trash-retention{display:block;align-self:center;color:#7c7160;font-size:10px;line-height:1.5}
 .distribution-tools{align-items:end}
 @media(max-width:600px){.cashier-view-tabs{width:100%}.cashier-view-tabs button{flex:1}.trash-retention{width:100%}}
+/* WDI: rentang tanggal pemesanan pada antrean Kasir */
+.cashier-toolbar-top{margin-bottom:10px}
+.cashier-filters{display:grid;grid-template-columns:minmax(190px,1.35fr) minmax(155px,.9fr) repeat(2,minmax(160px,.85fr)) auto;gap:12px;align-items:end;margin:0 0 16px}
+.cashier-date-filter,.cashier-filters .cashier-gender-filter{min-width:0}
+.cashier-date-warning{grid-column:1/-1}
+.cashier-filters>button{align-self:end;min-height:44px}
+@media(max-width:1000px){.cashier-filters{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.cashier-toolbar-top{align-items:flex-start}.cashier-filters{grid-template-columns:1fr}.cashier-date-warning{grid-column:auto}}
