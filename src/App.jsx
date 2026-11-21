@@ -811,8 +811,14 @@ function App() {
   }
   async function softDeleteOrder(id) {
     if (!supabase || !isStaff) return;
-    const target = orders.find(order => order.id === id);
-    if (!target) { setNotice('Pesanan tidak ditemukan pada antrean aktif. Muat ulang antrean.'); return; }
+    // Pesanan bisa berasal dari antrean Kasir, Laporan, atau Distribusi.
+    const target = [orders, reportOrders, distributionRows]
+      .flat()
+      .find(order => order.id === id);
+    if (!target) {
+      setNotice('Pesanan tidak ditemukan pada daftar aktif. Muat ulang data lalu coba kembali.');
+      return;
+    }
     if (profile?.role === 'cashier' && target.customer.gender !== normalizeGender(profile.cashier_gender)) {
       setNotice('Akun kasir tidak memiliki izin menghapus pesanan dari jalur lain.');
       return;
@@ -821,7 +827,10 @@ function App() {
       const { error } = await supabase.rpc('soft_delete_staff_order', { p_order_id: id });
       if (error) throw error;
       setNotice(`Pesanan ${target.number} dipindahkan ke Sampah. Pesanan dapat dipulihkan selama 3 hari.`);
-      await Promise.all([loadOrders(), loadTrashOrders()]);
+      const refreshTasks = [loadOrders(), loadTrashOrders()];
+      if (page === 'reports' && reportLoaded) refreshTasks.push(loadReportOrders());
+      if (page === 'distribution') refreshTasks.push(loadDistributionOrders(effectiveDistributionFrom, effectiveDistributionTo));
+      await Promise.all(refreshTasks);
     } catch (error) {
       setNotice(`Pesanan gagal dipindahkan ke Sampah: ${error?.message || 'Kesalahan jaringan.'}`);
     }
@@ -1118,29 +1127,101 @@ function App() {
       const ordersForGender = reportOrders.filter(order => order.customer.gender === gender);
       if (!ordersForGender.length) return '';
       const body = ordersForGender.map(order => {
-        const menu = order.items.map(item => `${escapeHtml(item.name)} x ${Number(item.qty)}`).join('<br>');
-        return `<tr><td>${escapeHtml(order.customer.name)}</td><td>${escapeHtml(order.customer.className)}</td><td>${escapeHtml(order.customer.dorm)}</td><td class="menu-cell">${menu}</td><td class="check-cell"><span class="check-box" aria-label="Belum dicek"></span></td></tr>`;
+        const menu = order.items
+          .map(item => `${escapeHtml(item.name)} x ${Number(item.qty)}`)
+          .join('<br>');
+        return `<tr>
+          <td>${escapeHtml(order.customer.name)}</td>
+          <td>${escapeHtml(order.customer.className)}</td>
+          <td>${escapeHtml(order.customer.dorm)}</td>
+          <td class="menu-cell">${menu}</td>
+          <td class="check-cell"><span class="check-box" aria-label="Belum dicek"></span></td>
+        </tr>`;
       }).join('');
-      return `<section class="gender-section"><h2>Santri ${gender}</h2><table><colgroup><col class="col-name"><col class="col-class"><col class="col-dorm"><col class="col-menu"><col class="col-check"></colgroup><thead><tr><th>Nama santri</th><th>Kelas</th><th>Asrama</th><th>Menu dan jumlah</th><th>Ceklis</th></tr></thead><tbody>${body}</tbody></table></section>`;
+      return `<section class="gender-section">
+        <h2>Santri ${gender}</h2>
+        <table>
+          <colgroup>
+            <col class="col-name"><col class="col-class"><col class="col-dorm">
+            <col class="col-menu"><col class="col-check">
+          </colgroup>
+          <thead><tr>
+            <th>Nama santri</th><th>Kelas</th><th>Asrama</th>
+            <th>Menu dan jumlah</th><th>Ceklis</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </section>`;
     }).join('');
 
-    const html = `<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ceklis Distribusi Warung Darul Ilmi</title><style>
-      *{box-sizing:border-box}html,body{margin:0;padding:0;background:#fff;color:#17251e}body{font:10pt/1.35 Arial,Helvetica,sans-serif}.document{width:100%;max-width:190mm;margin:0 auto;padding:0}h1{font-size:17pt;line-height:1.2;margin:0 0 5px;font-weight:700}.period{margin:0 0 18px;color:#4f5d55;font-size:9pt}.gender-section{margin:17px 0 22px}h2{font-size:12pt;margin:0 0 8px;padding:0 5px;break-after:avoid-page;page-break-after:avoid}table{width:100%;border-collapse:collapse;table-layout:fixed}col.col-name{width:23%}col.col-class{width:12%}col.col-dorm{width:16%}col.col-menu{width:39%}col.col-check{width:10%}th,td{border:1px solid #9eaaa2;padding:7px 6px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}th{background:#f2f4f1;font-weight:700}td.menu-cell{line-height:1.55}th:last-child,td.check-cell{text-align:center}.check-box{display:inline-block;width:15px;height:19px;border:1.4px solid #26382d;vertical-align:middle}tr{break-inside:avoid;page-break-inside:avoid}thead{display:table-header-group}tfoot{display:table-footer-group}.empty{padding:12px;border:1px solid #aaa}@page{size:A4 portrait;margin:12mm 10mm}@media screen{body{padding:12px}.document{max-width:190mm}}@media print{html,body{width:auto;background:#fff!important}body{margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}.document{max-width:none;width:100%}.gender-section{margin:12px 0 18px}h1{font-size:16pt}h2{font-size:11pt}th,td{padding:6px 5px}}
-    </style></head><body><main class="document"><h1>Warung Darul Ilmi â€“ Ceklis Distribusi</h1><p class="period">Periode: ${escapeHtml(reportPeriodLabel())} | Jumlah pesanan: ${reportOrders.length}</p>${rows || '<p class="empty">Tidak ada pesanan.</p>'}</main><script>window.addEventListener('load',()=>{setTimeout(()=>{window.focus();window.print();},350);});window.addEventListener('afterprint',()=>{setTimeout(()=>window.close(),250);});</script></body></html>`;
+    // HTML ini hanya berisi dokumen ceklis, tanpa komponen halaman aplikasi.
+    // Preview ditampilkan terlebih dahulu; pengguna menekan tombol cetak secara langsung.
+    const html = `<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warung Darul Ilmi â€“ Ceklis Distribusi</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#fff;color:#17251e}
+  body{font:10pt/1.35 Arial,Helvetica,sans-serif}
+  .document{width:100%;max-width:190mm;margin:0 auto;padding:0}
+  .toolbar{display:flex;justify-content:flex-end;gap:8px;margin:0 auto 14px;max-width:190mm}
+  .print-button{border:0;border-radius:8px;padding:11px 16px;background:#174737;color:#fff;font:700 14px Arial,sans-serif;cursor:pointer}
+  h1{font-size:17pt;line-height:1.2;margin:0 0 5px;font-weight:700}
+  .period{margin:0 0 18px;color:#4f5d55;font-size:9pt}
+  .gender-section{margin:17px 0 22px}
+  h2{font-size:12pt;margin:0 0 8px;padding:0 5px;break-after:avoid-page;page-break-after:avoid}
+  table{width:100%;border-collapse:collapse;table-layout:fixed}
+  col.col-name{width:23%} col.col-class{width:12%} col.col-dorm{width:16%}
+  col.col-menu{width:39%} col.col-check{width:10%}
+  th,td{border:1px solid #9eaaa2;padding:7px 6px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}
+  th{background:#f2f4f1;font-weight:700}
+  td.menu-cell{line-height:1.55}
+  th:last-child,td.check-cell{text-align:center}
+  .check-box{display:inline-block;width:15px;height:19px;border:1.4px solid #26382d;vertical-align:middle}
+  tr{break-inside:avoid;page-break-inside:avoid}
+  thead{display:table-header-group}
+  .empty{padding:12px;border:1px solid #aaa}
+  @page{size:A4 portrait;margin:12mm 10mm}
+  @media screen{body{padding:12px}.document{max-width:190mm}}
+  @media print{
+    html,body{width:auto;background:#fff!important}
+    body{margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .toolbar{display:none!important}
+    .document{max-width:none;width:100%}
+    .gender-section{margin:12px 0 18px}
+    h1{font-size:16pt} h2{font-size:11pt} th,td{padding:6px 5px}
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="print-button" type="button" onclick="window.print()">Cetak / Simpan sebagai PDF</button>
+  </div>
+  <main class="document">
+    <h1>Warung Darul Ilmi â€“ Ceklis Distribusi</h1>
+    <p class="period">Periode: ${escapeHtml(reportPeriodLabel())} | Jumlah pesanan: ${reportOrders.length}</p>
+    ${rows || '<p class="empty">Tidak ada pesanan.</p>'}
+  </main>
+</body>
+</html>`;
 
+    // Pop-up dibuka langsung saat klik tombol Ekspor PDF (bukan setelah proses async).
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
-      setNotice('Browser memblokir jendela PDF. Izinkan pop-up untuk situs Warung Darul Ilmi, lalu tekan Ekspor PDF kembali.');
+      setNotice('Browser memblokir jendela pratinjau. Izinkan pop-up untuk situs Warung Darul Ilmi, lalu tekan Ekspor PDF kembali.');
       return;
     }
     try {
       printWindow.document.open();
       printWindow.document.write(html);
       printWindow.document.close();
-      setNotice('Dokumen ceklis dibuka. Pilih Simpan sebagai PDF pada menu cetak browser.');
+      setNotice('Pratinjau ceklis siap. Tekan tombol Cetak / Simpan sebagai PDF pada tab yang terbuka.');
     } catch (error) {
-      printWindow.close();
-      setNotice(`Gagal menyiapkan PDF: ${error?.message || error}`);
+      try { printWindow.close(); } catch {}
+      setNotice(`Gagal menyiapkan pratinjau PDF: ${error?.message || error}`);
     }
   }
   async function exportTxtSummary() {
@@ -1221,7 +1302,7 @@ function App() {
       {page==='cashier'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">AREA OPERASIONAL</p><h1>Antrean Kasir {profile?.role==='cashier'?profile.cashier_gender:'Putra & Putri'}</h1><p className="muted">{profile?.role==='cashier'?`Akses dibatasi untuk pesanan santri ${profile.cashier_gender}.`:'Super Admin dapat memantau seluruh pesanan.'} Pemeriksaan pembayaran dan bukti transfer dilakukan melalui WhatsApp, bukan di aplikasi.</p>{profile?.role==='cashier'&&!['Putra','Putri'].includes(profile.cashier_gender)&&<div className="notice">Akun kasir belum memiliki jalur Putra/Putri. Super Admin harus mengatur kolom cashier_gender pada profil akun.</div>}</div>{!showTrash&&<div className="stats"><div className="stat-card"><small>Menunggu (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='pending').length}</strong></div><div className="stat-card"><small>Diproses (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>['confirmed','preparing'].includes(o.status)).length}</strong></div><div className="stat-card"><small>Siap diserahkan (pesanan dimuat)</small><strong>{scopedOrders.filter(o=>o.status==='ready').length}</strong></div></div>}<div className="toolbar cashier-toolbar-top"><h2>{showTrash?'Sampah pesanan':'Antrean pesanan'}</h2><div className="cashier-view-tabs"><button type="button" className={!showTrash?'active':''} onClick={()=>setShowTrash(false)}>Antrean aktif ({orders.length})</button><button type="button" className={showTrash?'active':''} onClick={()=>setShowTrash(true)}>Sampah ({trashOrders.length})</button></div></div><div className="cashier-filters">{!showTrash&&<input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Cari nama, tiket, asrama..."/>}{!showTrash&&<label className="cashier-gender-filter">Jalur pesanan<select aria-label="Filter jalur kasir" value={profile?.role==='cashier'?cashierGender:cashierGenderFilter} onChange={e=>setCashierGenderFilter(e.target.value)} disabled={profile?.role==='cashier'}><option value="Semua">Semua jalur (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select>{profile?.role==='cashier'&&<small>Filter dikunci sesuai penugasan akun kasir.</small>}</label>}{!showTrash&&<label className="cashier-date-filter">Dari tanggal pemesanan<input type="date" value={cashierOrderFrom} max={cashierOrderTo || undefined} onChange={e=>setCashierOrderFrom(e.target.value)}/></label>}{!showTrash&&<label className="cashier-date-filter">Sampai tanggal pemesanan<input type="date" value={cashierOrderTo} min={cashierOrderFrom || undefined} onChange={e=>setCashierOrderTo(e.target.value)}/></label>}{!showTrash&&invalidCashierOrderRange&&<span className="fine-print cashier-date-warning">Tanggal mulai tidak boleh melewati tanggal akhir.</span>}{!showTrash&&<button onClick={loadOrders}>Muat ulang</button>}{showTrash&&<button onClick={loadTrashOrders}>Muat ulang Sampah</button>}</div>{!showTrash&&loadingOrders&&<p className="muted">Memuat pesanan...</p>}{showTrash&&trashLoading&&<p className="muted">Memuat Sampah pesanan...</p>}<OrderList orders={showTrash?trashOrders:filteredOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor} onDelete={softDeleteOrder} onRestore={restoreOrder} trashMode={showTrash}/><div className="toolbar"><span className="muted">{showTrash?`Menampilkan ${trashOrders.length} pesanan di Sampah (maksimal 200).`:`Menampilkan ${filteredOrders.length} dari ${orders.length} pesanan yang dimuat.`}</span>{!showTrash&&ordersHasMore&&<button type="button" onClick={()=>loadOrders({append:true})} disabled={loadingOrders||ordersLoadingMore}>{ordersLoadingMore?'Memuat...':'Muat 100 pesanan berikutnya'}</button>}</div></section>}
       {page==='distribution'&&isStaff&&<section><div className="page-intro"><p className="eyebrow">DAPUR & PENYERAHAN</p><h1>Distribusi pesanan</h1><p className="muted">Kelompokkan pesanan berdasarkan tanggal pengiriman, kategori santri, dan asrama. Tanggal otomatis memilih tanggal pengiriman yang memiliki pesanan. Status penyerahan diubah oleh kasir dari halaman antrean. Halaman ini hanya untuk pemantauan distribusi.</p></div><div className="panel distribution-tools"><label>Dari tanggal pengiriman<input type="date" value={effectiveDistributionFrom} onChange={e=>setDistributionFrom(e.target.value)}/></label><label>Sampai tanggal pengiriman<input type="date" value={effectiveDistributionTo} min={effectiveDistributionFrom} onChange={e=>setDistributionTo(e.target.value)}/></label><label>Kategori santri<select value={effectiveDistributionGender} onChange={e=>setDistributionGender(e.target.value)} disabled={profile?.role==='cashier'}>{profile?.role==='super_admin'&&<option>Semua</option>}<option>Putra</option><option>Putri</option></select></label><div className="distribution-actions"><button onClick={()=>loadDistributionOrders(effectiveDistributionFrom,effectiveDistributionTo)} disabled={invalidDistributionRange}>Muat ulang pesanan</button></div></div>{invalidDistributionRange&&<p className="notice">Tanggal mulai tidak boleh melewati tanggal akhir.</p>}{distributionLoading&&<p className="muted">Memuat pesanan pada rentang tanggal pengiriman...</p>}{distributionLimitReached&&<p className="notice">Daftar tanggal ini mencapai batas pemuatan.</p>}<div className="stats"><div className="stat-card"><small>Pesanan pada rentang tanggal</small><strong>{distributionOrders.length}</strong></div><div className="stat-card"><small>Total item</small><strong>{distributionOrders.reduce((n,o)=>n+o.items.reduce((m,i)=>m+i.qty,0),0)}</strong></div><div className="stat-card"><small>Nilai pesanan</small><strong>{money(distributionOrders.reduce((n,o)=>n+o.total,0))}</strong></div></div>{!distributionOrders.length?<div className="panel empty">Belum ada pesanan pada rentang {effectiveDistributionFrom} sampai {effectiveDistributionTo}. Ubah rentang tanggal atau muat ulang pesanan.</div>:distributionGroups.map(group=><div className="distribution-group" key={`${group[0].deliveryDate}-${group[0].customer.gender}-${group[0].customer.dorm}`}><div className="section-heading"><div><p className="eyebrow">KELOMPOK DISTRIBUSI</p><h2>{new Date(`${group[0].deliveryDate}T00:00:00`).toLocaleDateString(`id-ID`,{day:`numeric`,month:`long`,year:`numeric`})} | {group[0].customer.gender} | {group[0].customer.dorm}</h2></div><span className="cart-pill">{group.length} pesanan</span></div>{group.map(o=><article className="panel distribution-card" key={o.id}><div><span className="category-label">{o.number}</span><h3>{o.customer.name}</h3><p className="muted">{o.customer.className}  |  {o.items.reduce((n,i)=>n+i.qty,0)} item  |  {money(o.total)}</p><p className="fine-print">Dipesan: {new Date(o.createdAt).toLocaleString(`id-ID`)} | Pengiriman: {o.deliveryDate}</p><div className="order-items">{o.items.map((i,k)=><div key={k}><span>{i.name}</span><b>x {i.qty}</b></div>)}</div>{o.note&&<p className="fine-print">Catatan dapur: {o.note}</p>}</div><div className="distribution-card-actions"><span className="status">{statusLabels[o.status]||o.status}</span></div></article>)}</div>)}</section>}
       {page==='admin'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">PUSAT KENDALI</p><h1>Portal Super Admin</h1><p className="muted">Pemantauan gabungan antrean Putra dan Putri.</p></div><div className="stats"><div className="stat-card"><small>Pesanan terbaru dimuat</small><strong>{orders.length}</strong></div><div className="stat-card"><small>Nilai pesanan terbaru dimuat</small><strong>{money(orders.reduce((s,o)=>s+o.total,0))}</strong></div><div className="stat-card"><small>Belum selesai (pesanan dimuat)</small><strong>{orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length}</strong></div></div><div className="split-stats"><div className="panel"><span className="category-label">SANTRI PUTRA</span><h2>{orders.filter(o=>o.customer.gender==='Putra').length}</h2><p className="muted">Pesanan masuk</p></div><div className="panel"><span className="category-label">SANTRI PUTRI</span><h2>{orders.filter(o=>o.customer.gender==='Putri').length}</h2><p className="muted">Pesanan masuk</p></div></div><div className="panel settings-panel"><h2>Laporan dan ekspor Excel</h2><p className="muted">Pilih rentang tanggal pengiriman, lihat transaksi yang masuk dalam periode tersebut, lalu unduh laporan Excel dengan satu baris untuk setiap transaksi santri.</p><button className="primary" type="button" onClick={()=>setPage('reports')}>Buka Laporan -&gt;</button></div></section>}
-      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Excel, PDF ceklis distribusi, dan TXT rekap menu mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button><button type="button" onClick={exportPdfChecklist} disabled={reportLoading||!reportLoaded||reportLimitReached}>Ekspor PDF (ceklis)</button><button type="button" onClick={exportTxtSummary} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh TXT</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'}  |  {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor}/>}</section>}
+      {page==='reports'&&isAdmin&&<section><div className="page-intro"><p className="eyebrow">LAPORAN OPERASIONAL</p><h1>Laporan pesanan</h1><p className="muted">Filter berdasarkan tanggal pengiriman dan kategori santri. Excel, PDF ceklis distribusi, dan TXT rekap menu mengikuti filter yang dipilih.</p></div><div className="stats"><div className="stat-card"><small>Transaksi dalam laporan</small><strong>{reportOrders.length}</strong></div><div className="stat-card"><small>Total nilai pesanan</small><strong>{money(reportOrders.reduce((sum,o)=>sum+o.total,0))}</strong></div><div className="stat-card"><small>Jumlah item</small><strong>{reportOrders.reduce((sum,o)=>sum+o.items.reduce((n,i)=>n+Number(i.qty||0),0),0)}</strong></div></div><div className="panel" style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:14,alignItems:'end'}}><label>Dari tanggal pengiriman<input type="date" value={reportFrom} disabled={reportLoading} onChange={e=>{setReportFrom(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Sampai tanggal pengiriman<input type="date" value={reportTo} min={reportFrom||undefined} disabled={reportLoading} onChange={e=>{setReportTo(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}/></label><label>Kategori santri<select value={reportGender} disabled={reportLoading} onChange={e=>{setReportGender(e.target.value);setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}}><option value="Semua">Semua (Putra & Putri)</option><option value="Putra">Khusus Putra</option><option value="Putri">Khusus Putri</option></select></label><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button type="button" onClick={()=>{setReportFrom('');setReportTo('');setReportGender('Semua');setReportOrders([]);setReportLoaded(false);setReportLimitReached(false);}} disabled={reportLoading}>Reset filter</button><button type="button" onClick={loadReportOrders} disabled={reportLoading}>{reportLoading?'Memuat laporan...':'Tampilkan / muat ulang laporan'}</button><button className="primary" type="button" onClick={exportWorkbook} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh Excel (.xlsx)</button><button type="button" onClick={exportPdfChecklist} disabled={reportLoading||!reportLoaded||reportLimitReached}>Ekspor PDF (ceklis)</button><button type="button" onClick={exportTxtSummary} disabled={reportLoading||!reportLoaded||reportLimitReached}>Unduh TXT</button></div></div><div className="toolbar"><h2>Daftar transaksi ({reportOrders.length})</h2><span className="muted">{reportFrom||'Awal'} s.d. {reportTo||'Terbaru'}  |  {reportGender==='Semua'?'Putra & Putri':reportGender}</span></div>{invalidReportRange?<div className="panel empty">Tanggal mulai tidak boleh melewati tanggal akhir.</div>:reportLoading?<div className="panel empty">Memuat laporan sesuai rentang tanggal...</div>:!reportLoaded?<div className="panel empty">Pilih minimal satu tanggal, lalu tekan Tampilkan / muat ulang laporan. Riwayat tidak diunduh seluruhnya saat halaman dibuka.</div>:<OrderList orders={reportOrders} onStatus={(id,v)=>updateOrder(id,{status:v})} onEdit={openOrderEditor} onDelete={softDeleteOrder}/>}</section>}
       {page==='catalog'&&isAdmin&&<section>
         <div className="page-intro"><p className="eyebrow">MANAJEMEN MENU</p><h1>Kelola katalog</h1><p className="muted">Tambah dan ubah produk, harga, kategori, serta ketersediaan yang tampil di halaman pelanggan.</p></div>
         <form className="panel settings-panel catalog-form" onSubmit={saveProduct}>
