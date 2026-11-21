@@ -650,7 +650,7 @@ function App() {
       setCart([]);
       setCartOpen(false);
       setIdentity({ name: '', gender: identity.gender, dorm: '', className: '', phone: '', note: '' });
-      if (whatsappUrl) {
+      if (whatsappWebUrl) {
         setNotice(`Pesanan ${result.order_number} tersimpan. Tekan tombol Kirim di WhatsApp untuk mengirim konfirmasi. Jika WhatsApp tidak terbuka, gunakan tombol WhatsApp pada halaman ini.`);
       } else {
         setNotice(`Pesanan ${result.order_number} tersimpan online. Admin belum mengisi nomor WhatsApp pada Pengaturan. Hubungi admin dan jangan mengirim ulang pesanan.`);
