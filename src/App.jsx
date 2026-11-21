@@ -777,6 +777,19 @@ function App() {
     }
 
     try {
+      // Cancellation is an atomic database action: status=cancelled and deleted_at set together.
+      if (patch.status === 'cancelled') {
+        const { error: cancelError } = await supabase.rpc('cancel_staff_order', { p_order_id: id });
+        if (cancelError) throw cancelError;
+
+        setNotice(`Pesanan ${target.number} dibatalkan dan dipindahkan ke Sampah. Pesanan dapat dipulihkan selama 3 hari.`);
+        const refreshTasks = [loadOrders(), loadTrashOrders()];
+        if (page === 'reports' && reportLoaded) refreshTasks.push(loadReportOrders());
+        if (page === 'distribution') refreshTasks.push(loadDistributionOrders(effectiveDistributionFrom, effectiveDistributionTo));
+        await Promise.all(refreshTasks);
+        return;
+      }
+
       const {data:updatedOrder,error}=await supabase
         .from('orders')
         .update(patch)
@@ -809,6 +822,7 @@ function App() {
       setNotice(`Perubahan pesanan gagal dipastikan: ${error?.message || 'Kesalahan jaringan.'}. Muat ulang antrean untuk memeriksa status terbaru.`);
     }
   }
+
   async function softDeleteOrder(id) {
     if (!supabase || !isStaff) return;
     // Pesanan bisa berasal dari antrean Kasir, Laporan, atau Distribusi.
