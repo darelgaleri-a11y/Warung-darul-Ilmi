@@ -18,6 +18,16 @@ function normalizeGender(value) {
   if (normalized === 'putri') return 'Putri';
   return '';
 }
+function buildWhatsAppUrls(phone, message) {
+  const normalizedPhone = String(phone || '').replace(/\D/g, '');
+  const encodedMessage = encodeURIComponent(String(message || ''));
+  if (!normalizedPhone) return { appUrl: '', webUrl: '' };
+  return {
+    // Android resolves this intent to the installed WhatsApp package when available.
+    appUrl: `intent://send/?phone=${normalizedPhone}&text=${encodedMessage}#Intent;scheme=whatsapp;package=com.whatsapp;end`,
+    webUrl: `https://wa.me/${normalizedPhone}?text=${encodedMessage}`
+  };
+}
 function localDateStartIso(value, offsetDays = 0) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
   const [year, month, day] = value.split('-').map(Number);
@@ -620,12 +630,14 @@ function App() {
         'Silakan kirim bukti transfer berupa foto/screenshot langsung di chat WhatsApp ini. Bukti transfer tidak diunggah ke aplikasi.'
       ].filter(Boolean).join('\n');
 
-      const whatsappUrl = wa ? `https://wa.me/${wa}?text=${encodeURIComponent(message)}` : '';
-      if (whatsappUrl) {
-        setWhatsAppFallbackUrl(whatsappUrl);
+      const { appUrl: whatsappAppUrl, webUrl: whatsappWebUrl } = buildWhatsAppUrls(wa, message);
+      if (whatsappWebUrl) {
+        // Keep the fallback available when Android/browser refuses the app intent.
+        setWhatsAppFallbackUrl(whatsappWebUrl);
         if (whatsappTab && !whatsappTab.closed) {
           try {
-            whatsappTab.location.replace(whatsappUrl);
+            const isAndroid = /Android/i.test(navigator.userAgent || '');
+            whatsappTab.location.replace(isAndroid ? whatsappAppUrl : whatsappWebUrl);
           } catch (navigationError) {
             try { whatsappTab.close(); } catch (closeError) { /* no-op */ }
           }
@@ -1298,7 +1310,7 @@ function App() {
     </header>
     <main className="main">
       {databaseStatus!=='connected'&&<div className={`notice db-status db-${databaseStatus}`} role="status">{databaseStatus==='checking'?'Memeriksa koneksi Supabase...':databaseStatus==='missing-config'?'Supabase belum dikonfigurasi. Isi .env.local terlebih dahulu.':'Koneksi database bermasalah. Periksa URL, publishable key, dan tabel.'}</div>}
-      {session&&authLoading&&<div className="notice">Memuat akses petugas...</div>}{session&&!authLoading&&!profile&&<div className="notice">Profil petugas tidak ditemukan atau belum memiliki akses.</div>}{notice&&<div className="notice notice-toast" role="status"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Tutup pemberitahuan">x</button></div>}{whatsAppFallbackUrl&&<div className="panel" role="status"><strong>Pesanan sudah tersimpan.</strong><p className="fine-print">Jika tab WhatsApp tidak terbuka otomatis, tekan tombol berikut. WhatsApp akan menampilkan pesan yang sudah disiapkan; Anda tetap perlu menekan Kirim di WhatsApp.</p><button className="primary full" type="button" onClick={()=>window.open(whatsAppFallbackUrl,'_blank','noopener,noreferrer')}>Buka WhatsApp untuk mengirim pesanan</button><button type="button" onClick={()=>setWhatsAppFallbackUrl('')}>Tutup pemberitahuan WhatsApp</button></div>}
+      {session&&authLoading&&<div className="notice">Memuat akses petugas...</div>}{session&&!authLoading&&!profile&&<div className="notice">Profil petugas tidak ditemukan atau belum memiliki akses.</div>}{notice&&<div className="notice notice-toast" role="status"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Tutup pemberitahuan">x</button></div>}{whatsAppFallbackUrl&&<div className="panel" role="status"><strong>Pesanan sudah tersimpan.</strong><p className="fine-print">Jika tab WhatsApp tidak terbuka otomatis, tekan tombol berikut. WhatsApp akan menampilkan pesan yang sudah disiapkan; Anda tetap perlu menekan Kirim di WhatsApp.</p><button className="primary full" type="button" onClick={()=>window.open(whatsAppFallbackUrl,'_blank','noopener,noreferrer')}>Buka WhatsApp melalui browser (alternatif)</button><button type="button" onClick={()=>setWhatsAppFallbackUrl('')}>Tutup pemberitahuan WhatsApp</button></div>}
       {page==='order'&&<section>
         <div className="hero"><div className="hero-pattern">*</div><p className="eyebrow">SELAMAT DATANG</p><h1>Pesan kebutuhanmu<br/><em>dengan mudah.</em></h1><p className="hero-copy">Pilih menu, periksa pesanan, lalu konfirmasi melalui WhatsApp.</p><div className="hero-meta"><span>Praktis</span><span>Tertata</span><span>Mudah dikonfirmasi</span></div></div>
         <div className="section-heading"><div><p className="eyebrow">LANGKAH 01</p><h2>Identitas santri</h2><p className="muted">Data ini membantu petugas mengantarkan pesanan ke tempat yang tepat.</p></div></div>
